@@ -46,11 +46,11 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # جدول المفاتيح (لم يعد بحاجة لـ is_used لأننا سنحذف المفتاح مباشرة عند استخدامه)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS admin_keys (
                     id SERIAL PRIMARY KEY,
                     key_value VARCHAR(20) NOT NULL UNIQUE,
-                    is_used SMALLINT DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -99,7 +99,6 @@ def generate_key():
 
 @app.route('/create_school', methods=['POST'])
 def create_school():
-    # استخدام request.values لالتقاط البيانات سواء كانت Form أو Multipart بشكل دقيق
     school_name = request.values.get('school_name')
     admin_password = request.values.get('admin_password')
     
@@ -112,25 +111,27 @@ def create_school():
 
     try:
         with connection.cursor() as cursor:
-            # التحقق الصارم من المفتاح وأنه غير مستخدم (is_used = 0)
-            cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s AND is_used = 0", (admin_password.strip(),))
+            clean_pass = admin_password.strip()
+            
+            # 1️⃣ التحقق: هل كلمة السر موجودة أصلاً في جدول المفاتيح؟
+            cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s", (clean_pass,))
             key_row = cursor.fetchone()
             
             if not key_row:
                 return jsonify({"status": "error", "message": "كلمة السر غير صحيحة أو تم استخدامها مسبقاً!"}), 400
 
-            # توليد إيدي عشوائي 6 أرقام فريد
+            # 2️⃣ توليد إيدي عشوائي 6 أرقام فريد للمدرسة
             while True:
                 school_id = ''.join(secrets.choice(string.digits) for _ in range(6))
                 cursor.execute("SELECT id FROM schools WHERE school_id = %s", (school_id,))
                 if not cursor.fetchone():
                     break
 
-            # إدخال المدرسة
+            # 3️⃣ إدخال المدرسة الجديدة
             cursor.execute("INSERT INTO schools (school_id, school_name) VALUES (%s, %s)", (school_id, school_name))
             
-            # تحديث المفتاح ليصبح مستخدماً بشكل نهائي
-            cursor.execute("UPDATE admin_keys SET is_used = 1 WHERE id = %s", (key_row['id'],))
+            # 4️⃣ 🔥 الحذف الفوري لكلمة السر من قاعدة البيانات لكي تنتهي ولا يمكن استخدامها ثانية
+            cursor.execute("DELETE FROM admin_keys WHERE id = %s", (key_row['id'],))
             
             connection.commit()
 
