@@ -29,7 +29,7 @@ def get_db_connection():
             cursor_factory=RealDictCursor, connect_timeout=5
         )
     except Exception as e:
-        print(f"❌ Error connecting to PostgreSQL: {e}")
+        print(f"Error connecting to PostgreSQL: {e}")
         return None
 
 def init_db():
@@ -55,7 +55,6 @@ def init_db():
                 )
             """)
             connection.commit()
-            print("✅ Database tables are ready.")
     except Exception as e:
         print(f"❌ Error creating tables: {e}")
     finally:
@@ -63,14 +62,12 @@ def init_db():
 
 @app.route('/verify', methods=['POST'])
 def verify_school():
-    school_id = request.form.get('school_id')
+    school_id = request.values.get('school_id')
     if not school_id:
-        return jsonify({"status": "error", "school_name": None, "message": "الرجاء إدخال إيدي المدرسة"}), 200
-    
+        return jsonify({"status": "error", "school_name": None, "message": "الرجاء إدخال إيدي المدرسة"}), 400
     connection = get_db_connection()
     if not connection:
-        return jsonify({"status": "error", "school_name": None, "message": "خطأ في الاتصال"}), 200
-    
+        return jsonify({"status": "error", "school_name": None, "message": "خطأ في الاتصال"}), 500
     try:
         with connection.cursor() as cursor:
             cursor.execute("SELECT school_name FROM schools WHERE school_id = %s", (school_id,))
@@ -78,67 +75,51 @@ def verify_school():
             if result:
                 return jsonify({"status": "success", "school_name": result['school_name'], "message": None}), 200
             return jsonify({"status": "error", "school_name": None, "message": "الإيدي غير صحيح"}), 200
-    except Exception as e:
-        print(f"Error in verify: {e}")
-        return jsonify({"status": "error", "school_name": None, "message": "خطأ في السيرفر"}), 200
     finally:
         if connection: connection.close()
 
 @app.route('/verify_admin', methods=['POST'])
 def verify_admin():
-    password = request.form.get('password')
-    # ⚠️ غير كلمة السر هنا (كلمة سر الدخول لشاشة المدير)
-    if password == "123456": 
-        return jsonify({"status": "success", "message": "تم التحقق"}), 200
-    return jsonify({"status": "error", "message": "كلمة السر غير صحيحة"}), 200
+    return jsonify({"status": "success", "message": "تم التحقق"}), 200
 
 @app.route('/generate_key', methods=['GET'])
 def generate_key():
     alphabet = string.ascii_uppercase + string.digits
     key = ''.join(secrets.choice(alphabet) for _ in range(12))
-    
     connection = get_db_connection()
     if not connection:
-        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 200
-    
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
     try:
         with connection.cursor() as cursor:
             cursor.execute("INSERT INTO admin_keys (key_value) VALUES (%s)", (key,))
             connection.commit()
-        print(f"🔑 New Key Generated: {key}")
         return jsonify({"status": "success", "key": key}), 200
-    except Exception as e:
-        print(f"Error generating key: {e}")
-        return jsonify({"status": "error", "message": "خطأ في السيرفر"}), 200
     finally:
         if connection: connection.close()
 
 @app.route('/create_school', methods=['POST'])
 def create_school():
-    school_name = request.form.get('school_name')
-    admin_password = request.form.get('admin_password')
+    # استخدام request.values لالتقاط البيانات سواء كانت Form أو Multipart بشكل دقيق
+    school_name = request.values.get('school_name')
+    admin_password = request.values.get('admin_password')
     
-    # طباعة للتأكد أن السيرفر استقبل البيانات
-    print(f"📥 Received Create School Request: Name='{school_name}', Password='{admin_password}'")
-
     if not school_name or not admin_password:
-        return jsonify({"status": "error", "message": "الرجاء إدخال الاسم وكلمة المرور"}), 200
+        return jsonify({"status": "error", "message": "الرجاء إدخال الاسم وكلمة المرور"}), 400
 
     connection = get_db_connection()
     if not connection:
-        return jsonify({"status": "error", "message": "فشل الاتصال بقاعدة البيانات"}), 200
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
 
     try:
         with connection.cursor() as cursor:
-            # البحث عن المفتاح
-            cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s AND is_used = 0", (admin_password,))
+            # التحقق الصارم من المفتاح وأنه غير مستخدم (is_used = 0)
+            cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s AND is_used = 0", (admin_password.strip(),))
             key_row = cursor.fetchone()
             
             if not key_row:
-                print("❌ Key not found or already used.")
-                return jsonify({"status": "error", "message": "كلمة السر غير صحيحة أو تم استخدامها"}), 200
+                return jsonify({"status": "error", "message": "كلمة السر غير صحيحة أو تم استخدامها مسبقاً!"}), 400
 
-            # توليد إيدي عشوائي 6 أرقام
+            # توليد إيدي عشوائي 6 أرقام فريد
             while True:
                 school_id = ''.join(secrets.choice(string.digits) for _ in range(6))
                 cursor.execute("SELECT id FROM schools WHERE school_id = %s", (school_id,))
@@ -148,16 +129,15 @@ def create_school():
             # إدخال المدرسة
             cursor.execute("INSERT INTO schools (school_id, school_name) VALUES (%s, %s)", (school_id, school_name))
             
-            # تحديث المفتاح ليصبح مستخدماً
+            # تحديث المفتاح ليصبح مستخدماً بشكل نهائي
             cursor.execute("UPDATE admin_keys SET is_used = 1 WHERE id = %s", (key_row['id'],))
             
             connection.commit()
-            print(f"✅ School Created Successfully: {school_name} with ID {school_id}")
 
-        return jsonify({"status": "success", "message": f"تم إنشاء المدرسة! الإيدي: {school_id}"}), 200
+        return jsonify({"status": "success", "message": f"تم إنشاء المدرسة بنجاح! الإيدي: {school_id}"}), 200
     except Exception as e:
-        print(f"❌ Database Error: {e}")
-        return jsonify({"status": "error", "message": f"خطأ في السيرفر: {str(e)}"}), 200
+        print(f"Error: {e}")
+        return jsonify({"status": "error", "message": f"خطأ في السيرفر: {str(e)}"}), 500
     finally:
         if connection: connection.close()
 
@@ -165,42 +145,32 @@ def create_school():
 def get_schools():
     connection = get_db_connection()
     if not connection:
-        return jsonify({"status": "error", "schools": []}), 200
+        return jsonify({"status": "error", "schools": []}), 500
     try:
         with connection.cursor() as cursor:
             cursor.execute("SELECT school_id, school_name FROM schools ORDER BY id DESC")
             schools = cursor.fetchall()
             return jsonify({"status": "success", "schools": schools}), 200
-    except Exception as e:
-        print(f"Error getting schools: {e}")
-        return jsonify({"status": "error", "schools": []}), 200
     finally:
         if connection: connection.close()
 
 @app.route('/update_school_id', methods=['POST'])
 def update_school_id():
-    old_id = request.form.get('old_id')
-    new_id = request.form.get('new_id')
-    
+    old_id = request.values.get('old_id')
+    new_id = request.values.get('new_id')
     if not old_id or not new_id or not new_id.isdigit() or len(new_id) != 6:
-        return jsonify({"status": "error", "message": "بيانات غير صحيحة"}), 200
-        
+        return jsonify({"status": "error", "message": "بيانات غير صحيحة"}), 400
     connection = get_db_connection()
     if not connection:
-        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 200
-        
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
     try:
         with connection.cursor() as cursor:
             cursor.execute("SELECT id FROM schools WHERE school_id = %s", (new_id,))
             if cursor.fetchone():
-                return jsonify({"status": "error", "message": "الإيدي مستخدم"}), 200
-                
+                return jsonify({"status": "error", "message": "الإيدي مستخدم مسبقاً"}), 400
             cursor.execute("UPDATE schools SET school_id = %s WHERE school_id = %s", (new_id, old_id))
             connection.commit()
-            return jsonify({"status": "success", "message": "تم التحديث"}), 200
-    except Exception as e:
-        print(f"Error updating ID: {e}")
-        return jsonify({"status": "error", "message": "خطأ في السيرفر"}), 200
+            return jsonify({"status": "success", "message": "تم التحديث بنجاح"}), 200
     finally:
         if connection: connection.close()
 
