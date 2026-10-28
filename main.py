@@ -80,11 +80,11 @@ def verify_school():
 
 @app.route('/verify_admin', methods=['POST'])
 def verify_admin():
-    # التحقق من كلمة سر المطور
     password = request.form.get('password')
-    if password == "ضع_كلمة_سر_المطور_هنا": # غيّر هذه الكلمة
+    # ⚠️ غير كلمة السر هنا
+    if password == "123456": 
         return jsonify({"status": "success", "message": "تم التحقق"}), 200
-    return jsonify({"status": "error", "message": "كلمة السر غير صحيحة"}), 401
+    return jsonify({"status": "error", "message": "كلمة السر غير صحيحة"}), 200 # ✅ هنا التعديل
 
 @app.route('/generate_key', methods=['GET'])
 def generate_key():
@@ -107,7 +107,8 @@ def create_school():
     admin_password = request.form.get('admin_password')
     
     if not school_name or not admin_password:
-        return jsonify({"status": "error", "message": "الرجاء إدخال الاسم وكلمة المرور"}), 400
+        # ✅ هنا التعديل
+        return jsonify({"status": "error", "message": "الرجاء إدخال الاسم وكلمة المرور"}), 200
 
     connection = get_db_connection()
     if not connection:
@@ -115,26 +116,21 @@ def create_school():
 
     try:
         with connection.cursor() as cursor:
-            # التحقق: هل المفتاح موجود وغير مستخدم؟
             cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s AND is_used = 0", (admin_password,))
             key_row = cursor.fetchone()
             
             if not key_row:
-                return jsonify({"status": "error", "message": "كلمة السر غير صحيحة أو تم استخدامها"}), 401
+                # ✅ هنا التعديل الأهم
+                return jsonify({"status": "error", "message": "كلمة السر غير صحيحة أو تم استخدامها"}), 200
 
-            # توليد إيدي عشوائي 6 أرقام
             while True:
                 school_id = ''.join(secrets.choice(string.digits) for _ in range(6))
                 cursor.execute("SELECT id FROM schools WHERE school_id = %s", (school_id,))
                 if not cursor.fetchone():
                     break
 
-            # إدخال المدرسة
             cursor.execute("INSERT INTO schools (school_id, school_name) VALUES (%s, %s)", (school_id, school_name))
-            
-            # تحديث المفتاح ليصبح مستخدماً
             cursor.execute("UPDATE admin_keys SET is_used = 1 WHERE id = %s", (key_row['id'],))
-            
             connection.commit()
 
         return jsonify({"status": "success", "message": f"تم إنشاء المدرسة! الإيدي: {school_id}"}), 200
@@ -162,7 +158,7 @@ def update_school_id():
     old_id = request.form.get('old_id')
     new_id = request.form.get('new_id')
     if not old_id or not new_id or not new_id.isdigit() or len(new_id) != 6:
-        return jsonify({"status": "error", "message": "بيانات غير صحيحة"}), 400
+        return jsonify({"status": "error", "message": "بيانات غير صحيحة"}), 200
     connection = get_db_connection()
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
@@ -170,7 +166,7 @@ def update_school_id():
         with connection.cursor() as cursor:
             cursor.execute("SELECT id FROM schools WHERE school_id = %s", (new_id,))
             if cursor.fetchone():
-                return jsonify({"status": "error", "message": "الإيدي مستخدم"}), 400
+                return jsonify({"status": "error", "message": "الإيدي مستخدم"}), 200
             cursor.execute("UPDATE schools SET school_id = %s WHERE school_id = %s", (new_id, old_id))
             connection.commit()
             return jsonify({"status": "success", "message": "تم التحديث"}), 200
