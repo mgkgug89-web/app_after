@@ -37,39 +37,24 @@ def get_db_connection():
         print(f"❌ Error connecting to PostgreSQL: {e}")
         return None
 
-# ✅ دالة إنشاء الجداول
-def init_db():
-    connection = get_db_connection()
-    if not connection:
-        print("⚠️ لم يتم إنشاء الجداول لأن الاتصال بقاعدة البيانات فشل.")
-        return
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS schools (
-                    id SERIAL PRIMARY KEY,
-                    school_id VARCHAR(6) NOT NULL UNIQUE,
-                    school_name VARCHAR(255) NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS admin_keys (
-                    id SERIAL PRIMARY KEY,
-                    key_value VARCHAR(20) NOT NULL UNIQUE,
-                    is_used SMALLINT DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            connection.commit()
-            print("✅ تم تهيئة قاعدة البيانات بنجاح.")
-    except Exception as e:
-        print(f"❌ Error creating tables: {e}")
-    finally:
-        if connection: connection.close()
-
-# ✅ الأهم: نقوم بتشغيل إنشاء الجداول مباشرة عند تحميل التطبيق
-init_db()
+# دالة إنشاء الجداول (يمكن استدعاؤها في أي وقت)
+def create_tables_if_not_exist(cursor):
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS schools (
+            id SERIAL PRIMARY KEY,
+            school_id VARCHAR(6) NOT NULL UNIQUE,
+            school_name VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS admin_keys (
+            id SERIAL PRIMARY KEY,
+            key_value VARCHAR(20) NOT NULL UNIQUE,
+            is_used SMALLINT DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
 @app.route('/verify', methods=['POST'])
 def verify_school():
@@ -82,6 +67,7 @@ def verify_school():
         return jsonify({"status": "error", "school_name": None, "message": "خطأ في الاتصال بقاعدة البيانات"}), 500
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor) # إنشاء الجداول إذا لم تكن موجودة
             cursor.execute("SELECT school_name FROM schools WHERE school_id = %s", (school_id,))
             result = cursor.fetchone()
             if result:
@@ -112,6 +98,9 @@ def generate_key():
         
     try:
         with connection.cursor() as cursor:
+            # ✅ الحل السحري: إنشاء الجداول هنا مباشرة قبل التوليد
+            create_tables_if_not_exist(cursor)
+            
             while True:
                 cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s", (key,))
                 if not cursor.fetchone():
@@ -141,6 +130,7 @@ def create_school():
 
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor) # إنشاء الجداول
             cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s AND is_used = 0", (admin_password.strip(),))
             key_row = cursor.fetchone()
             
@@ -172,6 +162,7 @@ def get_schools():
         return jsonify({"status": "error", "schools": []}), 500
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor) # إنشاء الجداول
             cursor.execute("SELECT school_id, school_name FROM schools ORDER BY id DESC")
             schools = cursor.fetchall()
             return jsonify({"status": "success", "schools": schools}), 200
@@ -192,6 +183,7 @@ def update_school_id():
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor) # إنشاء الجداول
             cursor.execute("SELECT id FROM schools WHERE school_id = %s", (new_id,))
             if cursor.fetchone():
                 return jsonify({"status": "error", "message": "الإيدي مستخدم مسبقاً"}), 400
@@ -209,7 +201,5 @@ def home():
     return jsonify({"message": "School API is running successfully!"}), 200
 
 if __name__ == '__main__':
-    # هذا السطر يبقى ليعمل محلياً
-    init_db()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
