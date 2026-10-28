@@ -21,7 +21,7 @@ app.json.ensure_ascii = False
 # ========================================================
 DB_HOST = os.environ.get("DB_HOST", "dpg-dbh4nsu1egvs739f4lhg-a")
 DB_USER = os.environ.get("DB_USER", "school_db_49kb_user")
-DB_PASSWORD = os.environ.get("DB_PASSWORD", "VELcHkBNHgaL7pfUmCNTUFv9nw20ZbsC") # ✅ تم وضع كلمة المرور
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "VELcHkBNHgaL7pfUmCNTUFv9nw20ZbsC")
 DB_NAME = os.environ.get("DB_NAME", "school_db_49kb")
 DB_PORT = os.environ.get("DB_PORT", "5432")
 
@@ -33,7 +33,7 @@ def get_db_connection():
         return psycopg2.connect(
             host=DB_HOST, user=DB_USER, password=DB_PASSWORD,
             database=DB_NAME, port=DB_PORT,
-            cursor_factory=RealDictCursor, connect_timeout=5
+            cursor_factory=RealDictCursor, connect_timeout=10
         )
     except Exception as e:
         print(f"❌ Error connecting to PostgreSQL: {e}")
@@ -85,6 +85,9 @@ def verify_school():
             if result:
                 return jsonify({"status": "success", "school_name": result['school_name'], "message": None}), 200
             return jsonify({"status": "error", "school_name": None, "message": "الإيدي غير صحيح"}), 200
+    except Exception as e:
+        print(f"❌ Error in verify: {e}")
+        return jsonify({"status": "error", "school_name": None, "message": "خطأ داخلي في السيرفر"}), 500
     finally:
         if connection: connection.close()
 
@@ -100,9 +103,11 @@ def verify_admin():
 def generate_key():
     alphabet = string.ascii_uppercase + string.digits
     key = ''.join(secrets.choice(alphabet) for _ in range(12))
+    
     connection = get_db_connection()
     if not connection:
-        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+        return jsonify({"status": "error", "message": "تعذر الاتصال بقاعدة البيانات"}), 500
+        
     try:
         with connection.cursor() as cursor:
             while True:
@@ -114,6 +119,9 @@ def generate_key():
             cursor.execute("INSERT INTO admin_keys (key_value) VALUES (%s)", (key,))
             connection.commit()
         return jsonify({"status": "success", "key": key}), 200
+    except Exception as e:
+        print(f"❌ Error generating key: {e}")
+        return jsonify({"status": "error", "message": f"خطأ في السيرفر: {str(e)}"}), 500
     finally:
         if connection: connection.close()
 
@@ -165,6 +173,9 @@ def get_schools():
             cursor.execute("SELECT school_id, school_name FROM schools ORDER BY id DESC")
             schools = cursor.fetchall()
             return jsonify({"status": "success", "schools": schools}), 200
+    except Exception as e:
+        print(f"❌ Error in get_schools: {e}")
+        return jsonify({"status": "error", "schools": []}), 500
     finally:
         if connection: connection.close()
 
@@ -185,6 +196,9 @@ def update_school_id():
             cursor.execute("UPDATE schools SET school_id = %s WHERE school_id = %s", (new_id, old_id))
             connection.commit()
             return jsonify({"status": "success", "message": "تم التحديث بنجاح"}), 200
+    except Exception as e:
+        print(f"❌ Error in update_school_id: {e}")
+        return jsonify({"status": "error", "message": "خطأ في السيرفر"}), 500
     finally:
         if connection: connection.close()
 
