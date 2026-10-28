@@ -13,13 +13,13 @@ app = Flask(__name__)
 CORS(app)
 
 # ========================================================
-# ⚠️⚠️ إعدادات قاعدة البيانات (ضع بياناتك هنا) ⚠️⚠️
+# ⚠️⚠️ إعدادات قاعدة البيانات (تأكد من وضع بياناتك الصحيحة هنا) ⚠️⚠️
 # ========================================================
-DB_HOST = "ضع_الـ Host_هنا"
-DB_USER = "ضع_الـ Username_هنا"
-DB_PASSWORD = "ضع_الـ Password_هنا"
-DB_NAME = "ضع_الـ Database_هنا"
-DB_PORT = "5432"
+DB_HOST = os.environ.get("DB_HOST", "ضع_الـ Host_هنا")
+DB_USER = os.environ.get("DB_USER", "ضع_الـ Username_هنا")
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "ضع_الـ Password_هنا")
+DB_NAME = os.environ.get("DB_NAME", "ضع_الـ Database_هنا")
+DB_PORT = os.environ.get("DB_PORT", "5432")
 
 def get_db_connection():
     try:
@@ -80,8 +80,13 @@ def verify_school():
 
 @app.route('/verify_admin', methods=['POST'])
 def verify_admin():
-    # يمكنك إضافة كلمة سر ثابته هنا لحماية شاشة المطور إذا أردت
-    return jsonify({"status": "success", "message": "تم التحقق"}), 200
+    # ⚠️ ضع كلمة سر المطور الخاصة بك هنا
+    ADMIN_SECRET_PASSWORD = "ضع_كلمة_سر_المطور_هنا" 
+    password = request.values.get('password')
+    if password == ADMIN_SECRET_PASSWORD:
+        return jsonify({"status": "success", "message": "تم التحقق"}), 200
+    else:
+        return jsonify({"status": "error", "message": "كلمة السر غير صحيحة"}), 401
 
 @app.route('/generate_key', methods=['GET'])
 def generate_key():
@@ -112,12 +117,12 @@ def create_school():
 
     try:
         with connection.cursor() as cursor:
-            # ✅ التحقق الصارم من المفتاح وأنه غير مستخدم
+            # 🛑 التحقق الصارم: هل المفتاح موجود وغير مستخدم؟
             cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s AND is_used = 0", (admin_password.strip(),))
             key_row = cursor.fetchone()
             
             if not key_row:
-                # إذا لم يجد المفتاح، يرجع خطأ فوراً
+                # إذا لم يجد المفتاح، نرجع خطأ 400 فوراً ولن يتم إنشاء المدرسة
                 return jsonify({"status": "error", "message": "كلمة السر غير صحيحة أو تم استخدامها مسبقاً!"}), 400
 
             # توليد إيدي عشوائي 6 أرقام فريد
@@ -130,7 +135,7 @@ def create_school():
             # إدخال المدرسة
             cursor.execute("INSERT INTO schools (school_id, school_name) VALUES (%s, %s)", (school_id, school_name))
             
-            # ✅ هنا الحل: حذف المفتاح نهائياً من قاعدة البيانات بدلاً من تحديثه
+            # ✅ حذف المفتاح نهائياً من قاعدة البيانات (حسب فكرتك الممتازة)
             cursor.execute("DELETE FROM admin_keys WHERE id = %s", (key_row['id'],))
             
             connection.commit()
