@@ -7,17 +7,15 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-# تحميل المتغيرات البيئية من ملف .env إن وجد
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
-# ✅ إصلاح مشكلة الرموز الغريبة وجعل اللغة العربية تظهر بشكل سليم
 app.json.ensure_ascii = False
 
 # ========================================================
-# ⚠️⚠️ إعدادات قاعدة البيانات (تم تعبئتها بالكامل) ⚠️⚠️
+# ⚠️⚠️ إعدادات قاعدة البيانات ⚠️⚠️
 # ========================================================
 DB_HOST = os.environ.get("DB_HOST", "dpg-dbh4nsu1egvs739f4lhg-a")
 DB_USER = os.environ.get("DB_USER", "school_db_49kb_user")
@@ -25,15 +23,16 @@ DB_PASSWORD = os.environ.get("DB_PASSWORD", "VELcHkBNHgaL7pfUmCNTUFv9nw20ZbsC")
 DB_NAME = os.environ.get("DB_NAME", "school_db_49kb")
 DB_PORT = os.environ.get("DB_PORT", "5432")
 
-# ✅ كلمة سر المطور الخاصة بك
 ADMIN_SECRET_PASSWORD = "2573486195715653N"
 
 def get_db_connection():
     try:
+        # ✅ إضافة sslmode='require' لحل مشكلة خطأ 500 نهائياً
         return psycopg2.connect(
             host=DB_HOST, user=DB_USER, password=DB_PASSWORD,
             database=DB_NAME, port=DB_PORT,
-            cursor_factory=RealDictCursor, connect_timeout=10
+            cursor_factory=RealDictCursor, connect_timeout=10,
+            sslmode='require'
         )
     except Exception as e:
         print(f"❌ Error connecting to PostgreSQL: {e}")
@@ -106,7 +105,7 @@ def generate_key():
     
     connection = get_db_connection()
     if not connection:
-        return jsonify({"status": "error", "message": "تعذر الاتصال بقاعدة البيانات"}), 500
+        return jsonify({"status": "error", "message": "السيرفر لا يستطيع الاتصال بقاعدة البيانات"}), 500
         
     try:
         with connection.cursor() as cursor:
@@ -135,7 +134,7 @@ def create_school():
 
     connection = get_db_connection()
     if not connection:
-        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+        return jsonify({"status": "error", "message": "خطأ في الاتصال بقاعدة البيانات"}), 500
 
     try:
         with connection.cursor() as cursor:
