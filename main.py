@@ -13,7 +13,7 @@ app = Flask(__name__)
 CORS(app)
 
 # ========================================================
-# ⚠️⚠️ إعدادات قاعدة البيانات ⚠️⚠️
+# ⚠️⚠️ إعدادات قاعدة البيانات (ضع بياناتك هنا) ⚠️⚠️
 # ========================================================
 DB_HOST = "ضع_الـ Host_هنا"
 DB_USER = "ضع_الـ Username_هنا"
@@ -46,11 +46,11 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            # جدول المفاتيح (لم يعد بحاجة لـ is_used لأننا سنحذف المفتاح مباشرة عند استخدامه)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS admin_keys (
                     id SERIAL PRIMARY KEY,
                     key_value VARCHAR(20) NOT NULL UNIQUE,
+                    is_used SMALLINT DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -80,6 +80,7 @@ def verify_school():
 
 @app.route('/verify_admin', methods=['POST'])
 def verify_admin():
+    # يمكنك إضافة كلمة سر ثابته هنا لحماية شاشة المطور إذا أردت
     return jsonify({"status": "success", "message": "تم التحقق"}), 200
 
 @app.route('/generate_key', methods=['GET'])
@@ -111,26 +112,25 @@ def create_school():
 
     try:
         with connection.cursor() as cursor:
-            clean_pass = admin_password.strip()
-            
-            # 1️⃣ التحقق: هل كلمة السر موجودة أصلاً في جدول المفاتيح؟
-            cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s", (clean_pass,))
+            # ✅ التحقق الصارم من المفتاح وأنه غير مستخدم
+            cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s AND is_used = 0", (admin_password.strip(),))
             key_row = cursor.fetchone()
             
             if not key_row:
+                # إذا لم يجد المفتاح، يرجع خطأ فوراً
                 return jsonify({"status": "error", "message": "كلمة السر غير صحيحة أو تم استخدامها مسبقاً!"}), 400
 
-            # 2️⃣ توليد إيدي عشوائي 6 أرقام فريد للمدرسة
+            # توليد إيدي عشوائي 6 أرقام فريد
             while True:
                 school_id = ''.join(secrets.choice(string.digits) for _ in range(6))
                 cursor.execute("SELECT id FROM schools WHERE school_id = %s", (school_id,))
                 if not cursor.fetchone():
                     break
 
-            # 3️⃣ إدخال المدرسة الجديدة
+            # إدخال المدرسة
             cursor.execute("INSERT INTO schools (school_id, school_name) VALUES (%s, %s)", (school_id, school_name))
             
-            # 4️⃣ 🔥 الحذف الفوري لكلمة السر من قاعدة البيانات لكي تنتهي ولا يمكن استخدامها ثانية
+            # ✅ هنا الحل: حذف المفتاح نهائياً من قاعدة البيانات بدلاً من تحديثه
             cursor.execute("DELETE FROM admin_keys WHERE id = %s", (key_row['id'],))
             
             connection.commit()
