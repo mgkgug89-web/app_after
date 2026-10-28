@@ -80,9 +80,11 @@ def verify_school():
 
 @app.route('/verify_admin', methods=['POST'])
 def verify_admin():
-    # هذا المسار للتحقق من كلمة سر المطور (للدخول لشاشة المدير)
-    # وهو غير مستخدم حالياً في التطبيق، لكنه موجود للتوافق
-    return jsonify({"status": "success", "message": "تم التحقق"}), 200
+    # التحقق من كلمة سر المطور
+    password = request.form.get('password')
+    if password == "ضع_كلمة_سر_المطور_هنا": # غيّر هذه الكلمة
+        return jsonify({"status": "success", "message": "تم التحقق"}), 200
+    return jsonify({"status": "error", "message": "كلمة السر غير صحيحة"}), 401
 
 @app.route('/generate_key', methods=['GET'])
 def generate_key():
