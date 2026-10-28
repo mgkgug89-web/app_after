@@ -37,8 +37,8 @@ def get_db_connection():
         print(f"❌ Error connecting to PostgreSQL: {e}")
         return None
 
-# دالة إنشاء الجداول (يمكن استدعاؤها في أي وقت)
-def create_tables_if_not_exist(cursor):
+# ✅ هذه الدالة السحرية تنشئ الجداول في كل مرة تُستدعى
+def ensure_tables_exist(cursor):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS schools (
             id SERIAL PRIMARY KEY,
@@ -67,7 +67,7 @@ def verify_school():
         return jsonify({"status": "error", "school_name": None, "message": "خطأ في الاتصال بقاعدة البيانات"}), 500
     try:
         with connection.cursor() as cursor:
-            create_tables_if_not_exist(cursor) # إنشاء الجداول إذا لم تكن موجودة
+            ensure_tables_exist(cursor) # ✅ إنشاء الجداول
             cursor.execute("SELECT school_name FROM schools WHERE school_id = %s", (school_id,))
             result = cursor.fetchone()
             if result:
@@ -98,8 +98,7 @@ def generate_key():
         
     try:
         with connection.cursor() as cursor:
-            # ✅ الحل السحري: إنشاء الجداول هنا مباشرة قبل التوليد
-            create_tables_if_not_exist(cursor)
+            ensure_tables_exist(cursor) # ✅ إنشاء الجداول هنا أيضاً
             
             while True:
                 cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s", (key,))
@@ -130,7 +129,8 @@ def create_school():
 
     try:
         with connection.cursor() as cursor:
-            create_tables_if_not_exist(cursor) # إنشاء الجداول
+            ensure_tables_exist(cursor) # ✅ إنشاء الجداول
+            
             cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s AND is_used = 0", (admin_password.strip(),))
             key_row = cursor.fetchone()
             
@@ -162,7 +162,8 @@ def get_schools():
         return jsonify({"status": "error", "schools": []}), 500
     try:
         with connection.cursor() as cursor:
-            create_tables_if_not_exist(cursor) # إنشاء الجداول
+            ensure_tables_exist(cursor) # ✅ إنشاء الجداول
+            
             cursor.execute("SELECT school_id, school_name FROM schools ORDER BY id DESC")
             schools = cursor.fetchall()
             return jsonify({"status": "success", "schools": schools}), 200
@@ -183,7 +184,8 @@ def update_school_id():
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
     try:
         with connection.cursor() as cursor:
-            create_tables_if_not_exist(cursor) # إنشاء الجداول
+            ensure_tables_exist(cursor) # ✅ إنشاء الجداول
+            
             cursor.execute("SELECT id FROM schools WHERE school_id = %s", (new_id,))
             if cursor.fetchone():
                 return jsonify({"status": "error", "message": "الإيدي مستخدم مسبقاً"}), 400
@@ -200,6 +202,7 @@ def update_school_id():
 def home():
     return jsonify({"message": "School API is running successfully!"}), 200
 
+# 🛑 تم إزالة init_db() من هنا لأننا نستخدم ensure_tables_exist داخل كل مسار
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
