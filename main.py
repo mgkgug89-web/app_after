@@ -27,7 +27,6 @@ ADMIN_SECRET_PASSWORD = "2573486195715653N"
 
 def get_db_connection():
     try:
-        # ✅ إضافة sslmode='require' لحل مشكلة خطأ 500 نهائياً
         return psycopg2.connect(
             host=DB_HOST, user=DB_USER, password=DB_PASSWORD,
             database=DB_NAME, port=DB_PORT,
@@ -38,6 +37,7 @@ def get_db_connection():
         print(f"❌ Error connecting to PostgreSQL: {e}")
         return None
 
+# ✅ دالة إنشاء الجداول
 def init_db():
     connection = get_db_connection()
     if not connection:
@@ -67,6 +67,9 @@ def init_db():
         print(f"❌ Error creating tables: {e}")
     finally:
         if connection: connection.close()
+
+# ✅ الأهم: نقوم بتشغيل إنشاء الجداول مباشرة عند تحميل التطبيق
+init_db()
 
 @app.route('/verify', methods=['POST'])
 def verify_school():
@@ -206,6 +209,7 @@ def home():
     return jsonify({"message": "School API is running successfully!"}), 200
 
 if __name__ == '__main__':
+    # هذا السطر يبقى ليعمل محلياً
     init_db()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
