@@ -37,25 +37,6 @@ def get_db_connection():
         print(f"❌ Error connecting to PostgreSQL: {e}")
         return None
 
-# ✅ هذه الدالة السحرية تنشئ الجداول في كل مرة تُستدعى
-def ensure_tables_exist(cursor):
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS schools (
-            id SERIAL PRIMARY KEY,
-            school_id VARCHAR(6) NOT NULL UNIQUE,
-            school_name VARCHAR(255) NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS admin_keys (
-            id SERIAL PRIMARY KEY,
-            key_value VARCHAR(20) NOT NULL UNIQUE,
-            is_used SMALLINT DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
 @app.route('/verify', methods=['POST'])
 def verify_school():
     school_id = request.values.get('school_id')
@@ -67,7 +48,15 @@ def verify_school():
         return jsonify({"status": "error", "school_name": None, "message": "خطأ في الاتصال بقاعدة البيانات"}), 500
     try:
         with connection.cursor() as cursor:
-            ensure_tables_exist(cursor) # ✅ إنشاء الجداول
+            # ✅ إنشاء الجدول أولاً
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS schools (
+                    id SERIAL PRIMARY KEY,
+                    school_id VARCHAR(6) NOT NULL UNIQUE,
+                    school_name VARCHAR(255) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             cursor.execute("SELECT school_name FROM schools WHERE school_id = %s", (school_id,))
             result = cursor.fetchone()
             if result:
@@ -98,8 +87,17 @@ def generate_key():
         
     try:
         with connection.cursor() as cursor:
-            ensure_tables_exist(cursor) # ✅ إنشاء الجداول هنا أيضاً
+            # ✅ الخطوة الأهم: إنشاء الجدول أولاً قبل البحث فيه
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS admin_keys (
+                    id SERIAL PRIMARY KEY,
+                    key_value VARCHAR(20) NOT NULL UNIQUE,
+                    is_used SMALLINT DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             
+            # الآن نبحث عن المفتاح
             while True:
                 cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s", (key,))
                 if not cursor.fetchone():
@@ -129,7 +127,23 @@ def create_school():
 
     try:
         with connection.cursor() as cursor:
-            ensure_tables_exist(cursor) # ✅ إنشاء الجداول
+            # ✅ إنشاء الجدولين لضمان عدم حدوث خطأ
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS schools (
+                    id SERIAL PRIMARY KEY,
+                    school_id VARCHAR(6) NOT NULL UNIQUE,
+                    school_name VARCHAR(255) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS admin_keys (
+                    id SERIAL PRIMARY KEY,
+                    key_value VARCHAR(20) NOT NULL UNIQUE,
+                    is_used SMALLINT DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             
             cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s AND is_used = 0", (admin_password.strip(),))
             key_row = cursor.fetchone()
@@ -162,8 +176,15 @@ def get_schools():
         return jsonify({"status": "error", "schools": []}), 500
     try:
         with connection.cursor() as cursor:
-            ensure_tables_exist(cursor) # ✅ إنشاء الجداول
-            
+            # ✅ إنشاء الجدول لضمان عدم حدوث خطأ
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS schools (
+                    id SERIAL PRIMARY KEY,
+                    school_id VARCHAR(6) NOT NULL UNIQUE,
+                    school_name VARCHAR(255) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             cursor.execute("SELECT school_id, school_name FROM schools ORDER BY id DESC")
             schools = cursor.fetchall()
             return jsonify({"status": "success", "schools": schools}), 200
@@ -184,8 +205,15 @@ def update_school_id():
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
     try:
         with connection.cursor() as cursor:
-            ensure_tables_exist(cursor) # ✅ إنشاء الجداول
-            
+            # ✅ إنشاء الجدول لضمان عدم حدوث خطأ
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS schools (
+                    id SERIAL PRIMARY KEY,
+                    school_id VARCHAR(6) NOT NULL UNIQUE,
+                    school_name VARCHAR(255) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             cursor.execute("SELECT id FROM schools WHERE school_id = %s", (new_id,))
             if cursor.fetchone():
                 return jsonify({"status": "error", "message": "الإيدي مستخدم مسبقاً"}), 400
@@ -202,7 +230,6 @@ def update_school_id():
 def home():
     return jsonify({"message": "School API is running successfully!"}), 200
 
-# 🛑 تم إزالة init_db() من هنا لأننا نستخدم ensure_tables_exist داخل كل مسار
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
