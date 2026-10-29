@@ -4,6 +4,7 @@ import string
 import psycopg2
 import requests
 import base64
+import io # ✅ مكتبة للتعامل مع الملفات
 from psycopg2.extras import RealDictCursor
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -24,7 +25,7 @@ DB_NAME = os.environ.get("DB_NAME", "school_db_49kb")
 DB_PORT = os.environ.get("DB_PORT", "5432")
 
 ADMIN_SECRET_PASSWORD = "2573486195715653N"
-IMGBB_API_KEY = "ef1c80e46e5d60d8c70ce4ddf3fcf500" # ✅ المفتاح الخاص بك
+IMGBB_API_KEY = "ef1c80e46e5d60d8c70ce4ddf3fcf500"
 
 def get_db_connection():
     try:
@@ -123,7 +124,7 @@ def generate_key():
 def create_school():
     school_name = request.values.get('school_name')
     admin_password = request.values.get('admin_password')
-    image_base64 = request.values.get('image_base64', '') # ✅ نستقبل الصورة كـ Base64
+    image_base64 = request.values.get('image_base64', '')
     
     if not school_name or not admin_password:
         return jsonify({"status": "error", "message": "الرجاء إدخال الاسم وكلمة المرور"}), 400
@@ -142,28 +143,36 @@ def create_school():
             if not key_row:
                 return jsonify({"status": "error", "message": "كلمة السر غير صحيحة أو تم استخدامها مسبقاً!"}), 400
 
-            # ✅ رفع الصورة إلى ImgBB (إذا كانت موجودة)
+            # ✅ رفع الصورة إلى ImgBB بطريقة multipart/form-data
             image_url = ""
             if image_base64:
                 try:
-                    # ImgBB يحتاج الصورة كـ base64 بدون البادئة (data:image/jpeg;base64,)
+                    # إزالة البادئة إذا وجدت
                     if "," in image_base64:
                         image_base64 = image_base64.split(",")[1]
                     
-                    payload = {
-                        "key": IMGBB_API_KEY,
-                        "image": image_base64
+                    # تحويل Base64 إلى ملف (Bytes)
+                    image_bytes = base64.b64decode(image_base64)
+                    
+                    # تجهيز الملف للإرسال
+                    files = {
+                        'image': ('school_image.jpg', image_bytes, 'image/jpeg')
                     }
-                    response = requests.post("https://api.imgbb.com/1/upload", data=payload)
+                    data = {
+                        'key': IMGBB_API_KEY
+                    }
+                    
+                    # إرسال الطلب إلى ImgBB (باستخدام files بدلاً من data)
+                    response = requests.post("https://api.imgbb.com/1/upload", files=files, data=data)
                     res_data = response.json()
                     
                     if res_data.get('success'):
-                        image_url = res_data['data']['url'] # ✅ الرابط المباشر
-                        print(f"✅ Image uploaded: {image_url}")
+                        image_url = res_data['data']['url']
+                        print(f"✅ Image uploaded successfully: {image_url}")
                     else:
-                        print(f"❌ ImgBB Error: {res_data}")
+                        print(f"❌ ImgBB API returned error: {res_data}")
                 except Exception as e:
-                    print(f"❌ Error uploading to ImgBB: {e}")
+                    print(f"❌ Exception while uploading to ImgBB: {e}")
 
             # توليد الإيدي وإدخال المدرسة
             while True:
@@ -175,7 +184,6 @@ def create_school():
             cursor.execute("INSERT INTO schools (school_id, school_name) VALUES (%s, %s) RETURNING id", (school_id, school_name))
             new_school_db_id = cursor.fetchone()['id']
 
-            # حفظ رابط الصورة في الجدول
             if image_url:
                 cursor.execute("INSERT INTO school_images (school_id, image_url) VALUES (%s, %s)", (new_school_db_id, image_url))
             
