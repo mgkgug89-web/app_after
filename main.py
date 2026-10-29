@@ -16,7 +16,7 @@ CORS(app)
 app.json.ensure_ascii = False
 
 # ========================================================
-# ⚠️⚠️ إعدادات قاعدة البيانات و ImgBB ⚠️⚠️
+# ⚠️⚠️ إعدادات قاعدة البيانات ⚠️⚠️
 # ========================================================
 DB_HOST = os.environ.get("DB_HOST", "dpg-dbh4nsu1egvs739f4lhg-a")
 DB_USER = os.environ.get("DB_USER", "school_db_49kb_user")
@@ -25,7 +25,6 @@ DB_NAME = os.environ.get("DB_NAME", "school_db_49kb")
 DB_PORT = os.environ.get("DB_PORT", "5432")
 
 ADMIN_SECRET_PASSWORD = "2573486195715653N"
-IMGBB_API_KEY = "ef1c80e46e5d60d8c70ce4ddf3fcf500"
 
 def get_db_connection():
     try:
@@ -143,7 +142,7 @@ def create_school():
             if not key_row:
                 return jsonify({"status": "error", "message": "كلمة السر غير صحيحة أو تم استخدامها مسبقاً!"}), 400
 
-            # ✅ رفع الصورة إلى ImgBB مع إضافة User-Agent
+            # ✅ رفع الصورة إلى Catbox.moe (بدون مفتاح API)
             image_url = ""
             if image_base64:
                 try:
@@ -152,34 +151,24 @@ def create_school():
                     
                     image_bytes = base64.b64decode(image_base64)
                     
+                    # إرسال الصورة إلى Catbox
                     files = {
-                        'image': ('school_image.jpg', image_bytes, 'image/jpeg')
+                        'fileToUpload': ('school_image.jpg', image_bytes, 'image/jpeg')
                     }
                     data = {
-                        'key': IMGBB_API_KEY
+                        'reqtype': 'fileupload'
                     }
                     
-                    # ✅ هذا هو الحل: إضافة هيدر يحاكي المتصفح
-                    headers = {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                    }
+                    response = requests.post("https://catbox.moe/user/api.php", files=files, data=data)
                     
-                    # إرسال الطلب مع الهيدر
-                    response = requests.post(
-                        "https://api.imgbb.com/1/upload", 
-                        files=files, 
-                        data=data,
-                        headers=headers # ✅ إضافة الهيدر هنا
-                    )
-                    res_data = response.json()
-                    
-                    if res_data.get('success'):
-                        image_url = res_data['data']['url']
+                    # Catbox يرجع الرابط مباشرة كنص عادي
+                    if response.status_code == 200 and response.text.startswith("https://"):
+                        image_url = response.text.strip()
                         print(f"✅ Image uploaded successfully: {image_url}")
                     else:
-                        print(f"❌ ImgBB API returned error: {res_data}")
+                        print(f"❌ Catbox API returned error: {response.text}")
                 except Exception as e:
-                    print(f"❌ Exception while uploading to ImgBB: {e}")
+                    print(f"❌ Exception while uploading to Catbox: {e}")
 
             # توليد الإيدي وإدخال المدرسة
             while True:
