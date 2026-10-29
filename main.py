@@ -16,13 +16,15 @@ CORS(app)
 app.json.ensure_ascii = False
 
 # ========================================================
-# ⚠️⚠️ إعدادات قاعدة البيانات ⚠️⚠️
+# ✅ إعدادات قاعدة البيانات الجديدة (Aiven)
+# ⚠️ ملاحظة: كلمة المرور تم إزالتها من الكود لحمايتها.
+# سيتم قراءتها من متغيرات البيئة (Environment Variables) على Render.
 # ========================================================
-DB_HOST = os.environ.get("DB_HOST", "dpg-dbh4nsu1egvs739f4lhg-a")
-DB_USER = os.environ.get("DB_USER", "school_db_49kb_user")
-DB_PASSWORD = os.environ.get("DB_PASSWORD", "VELcHkBNHgaL7pfUmCNTUFv9nw20ZbsC")
-DB_NAME = os.environ.get("DB_NAME", "school_db_49kb")
-DB_PORT = os.environ.get("DB_PORT", "5432")
+DB_HOST = os.environ.get("DB_HOST", "pg-13a81656-mgkgug89-4975.f.aivencloud.com")
+DB_USER = os.environ.get("DB_USER", "avnadmin")
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "") # ✅ تم الحذف
+DB_NAME = os.environ.get("DB_NAME", "defaultdb")
+DB_PORT = os.environ.get("DB_PORT", "13153")
 
 ADMIN_SECRET_PASSWORD = "2573486195715653N"
 
@@ -142,7 +144,7 @@ def create_school():
             if not key_row:
                 return jsonify({"status": "error", "message": "كلمة السر غير صحيحة أو تم استخدامها مسبقاً!"}), 400
 
-            # ✅ رفع الصورة إلى Catbox.moe (بدون مفتاح API)
+            # ✅ رفع الصورة إلى Catbox.moe
             image_url = ""
             if image_base64:
                 try:
@@ -151,7 +153,6 @@ def create_school():
                     
                     image_bytes = base64.b64decode(image_base64)
                     
-                    # إرسال الصورة إلى Catbox
                     files = {
                         'fileToUpload': ('school_image.jpg', image_bytes, 'image/jpeg')
                     }
@@ -161,7 +162,6 @@ def create_school():
                     
                     response = requests.post("https://catbox.moe/user/api.php", files=files, data=data)
                     
-                    # Catbox يرجع الرابط مباشرة كنص عادي
                     if response.status_code == 200 and response.text.startswith("https://"):
                         image_url = response.text.strip()
                         print(f"✅ Image uploaded successfully: {image_url}")
