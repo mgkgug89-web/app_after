@@ -4,7 +4,7 @@ import string
 import psycopg2
 import requests
 import base64
-import io # ✅ مكتبة للتعامل مع الملفات
+import io
 from psycopg2.extras import RealDictCursor
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -143,18 +143,15 @@ def create_school():
             if not key_row:
                 return jsonify({"status": "error", "message": "كلمة السر غير صحيحة أو تم استخدامها مسبقاً!"}), 400
 
-            # ✅ رفع الصورة إلى ImgBB بطريقة multipart/form-data
+            # ✅ رفع الصورة إلى ImgBB مع إضافة User-Agent
             image_url = ""
             if image_base64:
                 try:
-                    # إزالة البادئة إذا وجدت
                     if "," in image_base64:
                         image_base64 = image_base64.split(",")[1]
                     
-                    # تحويل Base64 إلى ملف (Bytes)
                     image_bytes = base64.b64decode(image_base64)
                     
-                    # تجهيز الملف للإرسال
                     files = {
                         'image': ('school_image.jpg', image_bytes, 'image/jpeg')
                     }
@@ -162,8 +159,18 @@ def create_school():
                         'key': IMGBB_API_KEY
                     }
                     
-                    # إرسال الطلب إلى ImgBB (باستخدام files بدلاً من data)
-                    response = requests.post("https://api.imgbb.com/1/upload", files=files, data=data)
+                    # ✅ هذا هو الحل: إضافة هيدر يحاكي المتصفح
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    }
+                    
+                    # إرسال الطلب مع الهيدر
+                    response = requests.post(
+                        "https://api.imgbb.com/1/upload", 
+                        files=files, 
+                        data=data,
+                        headers=headers # ✅ إضافة الهيدر هنا
+                    )
                     res_data = response.json()
                     
                     if res_data.get('success'):
