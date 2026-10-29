@@ -48,12 +48,12 @@ def verify_school():
         return jsonify({"status": "error", "school_name": None, "message": "خطأ في الاتصال بقاعدة البيانات"}), 500
     try:
         with connection.cursor() as cursor:
-            # ✅ إنشاء الجدول أولاً
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS schools (
                     id SERIAL PRIMARY KEY,
                     school_id VARCHAR(6) NOT NULL UNIQUE,
                     school_name VARCHAR(255) NOT NULL,
+                    image_uri TEXT, -- ✅ حقل جديد للصورة
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -87,7 +87,6 @@ def generate_key():
         
     try:
         with connection.cursor() as cursor:
-            # ✅ الخطوة الأهم: إنشاء الجدول أولاً قبل البحث فيه
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS admin_keys (
                     id SERIAL PRIMARY KEY,
@@ -97,7 +96,6 @@ def generate_key():
                 )
             """)
             
-            # الآن نبحث عن المفتاح
             while True:
                 cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s", (key,))
                 if not cursor.fetchone():
@@ -117,6 +115,7 @@ def generate_key():
 def create_school():
     school_name = request.values.get('school_name')
     admin_password = request.values.get('admin_password')
+    image_uri = request.values.get('image_uri', '') # ✅ استقبال الصورة
     
     if not school_name or not admin_password:
         return jsonify({"status": "error", "message": "الرجاء إدخال الاسم وكلمة المرور"}), 400
@@ -127,12 +126,12 @@ def create_school():
 
     try:
         with connection.cursor() as cursor:
-            # ✅ إنشاء الجدولين لضمان عدم حدوث خطأ
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS schools (
                     id SERIAL PRIMARY KEY,
                     school_id VARCHAR(6) NOT NULL UNIQUE,
                     school_name VARCHAR(255) NOT NULL,
+                    image_uri TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -157,7 +156,7 @@ def create_school():
                 if not cursor.fetchone():
                     break
 
-            cursor.execute("INSERT INTO schools (school_id, school_name) VALUES (%s, %s)", (school_id, school_name))
+            cursor.execute("INSERT INTO schools (school_id, school_name, image_uri) VALUES (%s, %s, %s)", (school_id, school_name, image_uri))
             cursor.execute("DELETE FROM admin_keys WHERE id = %s", (key_row['id'],))
             
             connection.commit()
@@ -176,16 +175,16 @@ def get_schools():
         return jsonify({"status": "error", "schools": []}), 500
     try:
         with connection.cursor() as cursor:
-            # ✅ إنشاء الجدول لضمان عدم حدوث خطأ
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS schools (
                     id SERIAL PRIMARY KEY,
                     school_id VARCHAR(6) NOT NULL UNIQUE,
                     school_name VARCHAR(255) NOT NULL,
+                    image_uri TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            cursor.execute("SELECT school_id, school_name FROM schools ORDER BY id DESC")
+            cursor.execute("SELECT school_id, school_name, image_uri FROM schools ORDER BY id DESC")
             schools = cursor.fetchall()
             return jsonify({"status": "success", "schools": schools}), 200
     except Exception as e:
@@ -205,12 +204,12 @@ def update_school_id():
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
     try:
         with connection.cursor() as cursor:
-            # ✅ إنشاء الجدول لضمان عدم حدوث خطأ
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS schools (
                     id SERIAL PRIMARY KEY,
                     school_id VARCHAR(6) NOT NULL UNIQUE,
                     school_name VARCHAR(255) NOT NULL,
+                    image_uri TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
