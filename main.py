@@ -2,20 +2,20 @@ import os
 import secrets
 import string
 import psycopg2
+import requests
+import base64
 from psycopg2.extras import RealDictCursor
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 
 load_dotenv()
-
 app = Flask(__name__)
 CORS(app)
-
 app.json.ensure_ascii = False
 
 # ========================================================
-# ⚠️⚠️ إعدادات قاعدة البيانات ⚠️⚠️
+# ⚠️⚠️ إعدادات قاعدة البيانات و ImgBB ⚠️⚠️
 # ========================================================
 DB_HOST = os.environ.get("DB_HOST", "dpg-dbh4nsu1egvs739f4lhg-a")
 DB_USER = os.environ.get("DB_USER", "school_db_49kb_user")
@@ -24,6 +24,7 @@ DB_NAME = os.environ.get("DB_NAME", "school_db_49kb")
 DB_PORT = os.environ.get("DB_PORT", "5432")
 
 ADMIN_SECRET_PASSWORD = "2573486195715653N"
+IMGBB_API_KEY = "ef1c80e46e5d60d8c70ce4ddf3fcf500" # ✅ المفتاح الخاص بك
 
 def get_db_connection():
     try:
@@ -37,6 +38,31 @@ def get_db_connection():
         print(f"❌ Error connecting to PostgreSQL: {e}")
         return None
 
+def create_tables_if_not_exist(cursor):
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS schools (
+            id SERIAL PRIMARY KEY,
+            school_id VARCHAR(6) NOT NULL UNIQUE,
+            school_name VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS school_images (
+            school_id INT PRIMARY KEY REFERENCES schools(id) ON DELETE CASCADE,
+            image_url TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS admin_keys (
+            id SERIAL PRIMARY KEY,
+            key_value VARCHAR(20) NOT NULL UNIQUE,
+            is_used SMALLINT DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
 @app.route('/verify', methods=['POST'])
 def verify_school():
     school_id = request.values.get('school_id')
@@ -48,22 +74,13 @@ def verify_school():
         return jsonify({"status": "error", "school_name": None, "message": "خطأ في الاتصال بقاعدة البيانات"}), 500
     try:
         with connection.cursor() as cursor:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS schools (
-                    id SERIAL PRIMARY KEY,
-                    school_id VARCHAR(6) NOT NULL UNIQUE,
-                    school_name VARCHAR(255) NOT NULL,
-                    image_uri TEXT, -- ✅ حقل جديد للصورة
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+            create_tables_if_not_exist(cursor)
             cursor.execute("SELECT school_name FROM schools WHERE school_id = %s", (school_id,))
             result = cursor.fetchone()
             if result:
                 return jsonify({"status": "success", "school_name": result['school_name'], "message": None}), 200
             return jsonify({"status": "error", "school_name": None, "message": "الإيدي غير صحيح"}), 200
     except Exception as e:
-        print(f"❌ Error in verify: {e}")
         return jsonify({"status": "error", "school_name": None, "message": "خطأ داخلي في السيرفر"}), 500
     finally:
         if connection: connection.close()
@@ -87,15 +104,7 @@ def generate_key():
         
     try:
         with connection.cursor() as cursor:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS admin_keys (
-                    id SERIAL PRIMARY KEY,
-                    key_value VARCHAR(20) NOT NULL UNIQUE,
-                    is_used SMALLINT DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
+            create_tables_if_not_exist(cursor)
             while True:
                 cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s", (key,))
                 if not cursor.fetchone():
@@ -106,7 +115,6 @@ def generate_key():
             connection.commit()
         return jsonify({"status": "success", "key": key}), 200
     except Exception as e:
-        print(f"❌ Error generating key: {e}")
         return jsonify({"status": "error", "message": f"خطأ في السيرفر: {str(e)}"}), 500
     finally:
         if connection: connection.close()
@@ -115,7 +123,7 @@ def generate_key():
 def create_school():
     school_name = request.values.get('school_name')
     admin_password = request.values.get('admin_password')
-    image_uri = request.values.get('image_uri', '') # ✅ استقبال الصورة
+    image_base64 = request.values.get('image_base64', '') # ✅ نستقبل الصورة كـ Base64
     
     if not school_name or not admin_password:
         return jsonify({"status": "error", "message": "الرجاء إدخال الاسم وكلمة المرور"}), 400
@@ -126,23 +134,7 @@ def create_school():
 
     try:
         with connection.cursor() as cursor:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS schools (
-                    id SERIAL PRIMARY KEY,
-                    school_id VARCHAR(6) NOT NULL UNIQUE,
-                    school_name VARCHAR(255) NOT NULL,
-                    image_uri TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS admin_keys (
-                    id SERIAL PRIMARY KEY,
-                    key_value VARCHAR(20) NOT NULL UNIQUE,
-                    is_used SMALLINT DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+            create_tables_if_not_exist(cursor)
             
             cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s AND is_used = 0", (admin_password.strip(),))
             key_row = cursor.fetchone()
@@ -150,15 +142,44 @@ def create_school():
             if not key_row:
                 return jsonify({"status": "error", "message": "كلمة السر غير صحيحة أو تم استخدامها مسبقاً!"}), 400
 
+            # ✅ رفع الصورة إلى ImgBB (إذا كانت موجودة)
+            image_url = ""
+            if image_base64:
+                try:
+                    # ImgBB يحتاج الصورة كـ base64 بدون البادئة (data:image/jpeg;base64,)
+                    if "," in image_base64:
+                        image_base64 = image_base64.split(",")[1]
+                    
+                    payload = {
+                        "key": IMGBB_API_KEY,
+                        "image": image_base64
+                    }
+                    response = requests.post("https://api.imgbb.com/1/upload", data=payload)
+                    res_data = response.json()
+                    
+                    if res_data.get('success'):
+                        image_url = res_data['data']['url'] # ✅ الرابط المباشر
+                        print(f"✅ Image uploaded: {image_url}")
+                    else:
+                        print(f"❌ ImgBB Error: {res_data}")
+                except Exception as e:
+                    print(f"❌ Error uploading to ImgBB: {e}")
+
+            # توليد الإيدي وإدخال المدرسة
             while True:
                 school_id = ''.join(secrets.choice(string.digits) for _ in range(6))
                 cursor.execute("SELECT id FROM schools WHERE school_id = %s", (school_id,))
                 if not cursor.fetchone():
                     break
 
-            cursor.execute("INSERT INTO schools (school_id, school_name, image_uri) VALUES (%s, %s, %s)", (school_id, school_name, image_uri))
-            cursor.execute("DELETE FROM admin_keys WHERE id = %s", (key_row['id'],))
+            cursor.execute("INSERT INTO schools (school_id, school_name) VALUES (%s, %s) RETURNING id", (school_id, school_name))
+            new_school_db_id = cursor.fetchone()['id']
+
+            # حفظ رابط الصورة في الجدول
+            if image_url:
+                cursor.execute("INSERT INTO school_images (school_id, image_url) VALUES (%s, %s)", (new_school_db_id, image_url))
             
+            cursor.execute("DELETE FROM admin_keys WHERE id = %s", (key_row['id'],))
             connection.commit()
 
         return jsonify({"status": "success", "message": f"تم إنشاء المدرسة بنجاح! الإيدي: {school_id}"}), 200
@@ -175,20 +196,16 @@ def get_schools():
         return jsonify({"status": "error", "schools": []}), 500
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS schools (
-                    id SERIAL PRIMARY KEY,
-                    school_id VARCHAR(6) NOT NULL UNIQUE,
-                    school_name VARCHAR(255) NOT NULL,
-                    image_uri TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
+                SELECT s.school_id, s.school_name, si.image_url 
+                FROM schools s 
+                LEFT JOIN school_images si ON s.id = si.school_id 
+                ORDER BY s.id DESC
             """)
-            cursor.execute("SELECT school_id, school_name, image_uri FROM schools ORDER BY id DESC")
             schools = cursor.fetchall()
             return jsonify({"status": "success", "schools": schools}), 200
     except Exception as e:
-        print(f"❌ Error in get_schools: {e}")
         return jsonify({"status": "error", "schools": []}), 500
     finally:
         if connection: connection.close()
@@ -204,15 +221,7 @@ def update_school_id():
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
     try:
         with connection.cursor() as cursor:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS schools (
-                    id SERIAL PRIMARY KEY,
-                    school_id VARCHAR(6) NOT NULL UNIQUE,
-                    school_name VARCHAR(255) NOT NULL,
-                    image_uri TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+            create_tables_if_not_exist(cursor)
             cursor.execute("SELECT id FROM schools WHERE school_id = %s", (new_id,))
             if cursor.fetchone():
                 return jsonify({"status": "error", "message": "الإيدي مستخدم مسبقاً"}), 400
@@ -220,7 +229,6 @@ def update_school_id():
             connection.commit()
             return jsonify({"status": "success", "message": "تم التحديث بنجاح"}), 200
     except Exception as e:
-        print(f"❌ Error in update_school_id: {e}")
         return jsonify({"status": "error", "message": "خطأ في السيرفر"}), 500
     finally:
         if connection: connection.close()
