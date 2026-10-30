@@ -17,10 +17,8 @@ app.json.ensure_ascii = False
 
 ADMIN_SECRET_PASSWORD = "2573486195715653N"
 
-# ✅ متغير عام للتخزين المؤقت (Caching)
 cached_schools = []
 
-# دالة ذكية لتوزيع الأرقام على 5 قواعد (رقمين لكل قاعدة)
 def get_db_index(school_id):
     if not school_id or not str(school_id)[0].isdigit():
         return 0
@@ -30,16 +28,13 @@ def get_db_index(school_id):
 def get_db_connection(school_id=None):
     try:
         db_index = get_db_index(school_id) if school_id else 0
-        
         host = os.environ.get(f"DB_HOST_{db_index}")
         password = os.environ.get(f"DB_PASSWORD_{db_index}")
-        
         user = os.environ.get(f"DB_USER_{db_index}", "avnadmin")
         dbname = os.environ.get(f"DB_NAME_{db_index}", "defaultdb")
         port = os.environ.get(f"DB_PORT_{db_index}", "13153")
 
         if not host or not password:
-            print(f"❌ Missing credentials for DB_{db_index}")
             return None
 
         return psycopg2.connect(
@@ -53,7 +48,6 @@ def get_db_connection(school_id=None):
         return None
 
 def create_tables_if_not_exist(cursor):
-    # إنشاء جدول المدارس الأساسي
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS schools (
             id SERIAL PRIMARY KEY,
@@ -64,12 +58,9 @@ def create_tables_if_not_exist(cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    
-    # ✅ إضافة الأعمدة الناقصة تلقائياً إذا كان الجدول موجوداً مسبقاً من نسخة قديمة
     cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS admin_device_id VARCHAR(255);")
     cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS admin_password VARCHAR(255) DEFAULT '123456';")
 
-    # جدول صور المدارس
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS school_images (
             school_id INT PRIMARY KEY REFERENCES schools(id) ON DELETE CASCADE,
@@ -78,7 +69,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
     
-    # جدول مفاتيح الأدمن
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS admin_keys (
             id SERIAL PRIMARY KEY,
@@ -88,7 +78,7 @@ def create_tables_if_not_exist(cursor):
         )
     """)
     
-    # ✅ جدول الفصول الخاصة بكل مدرسة مع كلمة السر
+    # ✅ جدول الفصول الخاصة بكل مدرسة مع حمايتها بكلمة سر
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS classes (
             id SERIAL PRIMARY KEY,
@@ -101,7 +91,6 @@ def create_tables_if_not_exist(cursor):
     """)
 
 def init_all_databases():
-    print("🚀 Initializing all 5 databases...")
     for i in range(5):
         conn = get_db_connection(str(i * 2))
         if conn:
@@ -109,17 +98,13 @@ def init_all_databases():
                 with conn.cursor() as cursor:
                     create_tables_if_not_exist(cursor)
                     conn.commit()
-                    print(f"✅ DB_{i} tables created successfully.")
-            except Exception as e:
-                print(f"❌ Error initializing DB_{i}: {e}")
+            except Exception:
+                pass
             finally:
                 conn.close()
-        else:
-            print(f"⚠️ Could not connect to DB_{i} for initialization.")
 
 def refresh_cache():
     global cached_schools
-    print("🔄 Refreshing cache...")
     all_schools = []
     for i in range(5):
         connection = get_db_connection(str(i * 2)) 
@@ -135,14 +120,13 @@ def refresh_cache():
                     ORDER BY s.id DESC
                 """)
                 all_schools.extend(cursor.fetchall())
-        except Exception as e:
-            print(f"❌ Error reading from DB_{i}: {e}")
+        except Exception:
+            pass
         finally:
             if connection: connection.close()
             
     all_schools.sort(key=lambda x: x['school_id'], reverse=True)
     cached_schools = all_schools
-    print("✅ Cache refreshed successfully.")
 
 init_all_databases()
 refresh_cache()
@@ -164,7 +148,7 @@ def verify_school():
             if result:
                 return jsonify({"status": "success", "school_name": result['school_name'], "message": None}), 200
             return jsonify({"status": "error", "school_name": None, "message": "الإيدي غير صحيح"}), 200
-    except Exception as e:
+    except Exception:
         return jsonify({"status": "error", "school_name": None, "message": "خطأ داخلي في السيرفر"}), 500
     finally:
         if connection: connection.close()
@@ -177,6 +161,49 @@ def verify_admin():
     else:
         return jsonify({"status": "error", "message": "كلمة السر غير صحيحة"}), 401
 
+@app.route('/verify_school_admin', methods=['POST'])
+def verify_school_admin():
+    school_id = request.values.get('school_id')
+    password = request.values.get('password')
+    if not school_id or not password:
+        return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
+    
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT admin_password FROM schools WHERE school_id = %s", (school_id,))
+            row = cursor.fetchone()
+            if row and row['admin_password'] == password:
+                return jsonify({"status": "success", "message": "تم التحقق بنجاح"}), 200
+            return jsonify({"status": "error", "message": "كلمة سر المدير غير صحيحة"}), 401
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+@app.route('/update_school_admin_password', methods=['POST'])
+def update_school_admin_password():
+    school_id = request.values.get('school_id')
+    new_password = request.values.get('new_password')
+    if not school_id or not new_password:
+        return jsonify({"status": "error", "message": "بيانات غير كافية"}), 400
+    
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE schools SET admin_password = %s WHERE school_id = %s", (new_password, school_id))
+            connection.commit()
+            refresh_cache()
+            return jsonify({"status": "success", "message": "تم تحديث كلمة سر المدير بنجاح"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
 @app.route('/generate_key', methods=['GET'])
 def generate_key():
     alphabet = string.ascii_uppercase + string.digits
@@ -184,7 +211,7 @@ def generate_key():
     
     connection = get_db_connection("0")
     if not connection:
-        return jsonify({"status": "error", "message": "السيرفر لا يستطيع الاتصال بقاعدة البيانات"}), 500
+        return jsonify({"status": "error", "message": "السيرفر لا يستطيع الاتصال"}), 500
         
     try:
         with connection.cursor() as cursor:
@@ -199,7 +226,7 @@ def generate_key():
             connection.commit()
         return jsonify({"status": "success", "key": key}), 200
     except Exception as e:
-        return jsonify({"status": "error", "message": f"خطأ في السيرفر: {str(e)}"}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if connection: connection.close()
 
@@ -239,7 +266,6 @@ def create_school():
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
-            
             cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s AND is_used = 0", (admin_password.strip(),))
             key_row = cursor.fetchone()
             
@@ -257,8 +283,8 @@ def create_school():
                     response = requests.post("https://catbox.moe/user/api.php", files=files, data=data)
                     if response.status_code == 200 and response.text.startswith("https://"):
                         image_url = response.text.strip()
-                except Exception as e:
-                    print(f"❌ Exception while uploading: {e}")
+                except Exception:
+                    pass
 
             cursor.execute("INSERT INTO schools (school_id, school_name, admin_device_id, admin_password) VALUES (%s, %s, %s, %s) RETURNING id", (school_id, school_name, device_id, "123456"))
             new_school_db_id = cursor.fetchone()['id']
@@ -272,8 +298,7 @@ def create_school():
         refresh_cache()
         return jsonify({"status": "success", "message": f"تم إنشاء المدرسة بنجاح! الإيدي: {school_id}"}), 200
     except Exception as e:
-        print(f"❌ Error in create_school: {e}")
-        return jsonify({"status": "error", "message": f"خطأ في السيرفر: {str(e)}"}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if connection: connection.close()
 
@@ -281,7 +306,7 @@ def create_school():
 def get_schools():
     return jsonify({"status": "success", "schools": cached_schools}), 200
 
-# ✅ إدارة الفصول الخاصة بالمدرسة
+# ✅ إدارة الفصول الخاصة بكل مدرسة حصرياً
 @app.route('/get_classes', methods=['POST'])
 def get_classes():
     school_id = request.values.get('school_id')
@@ -296,7 +321,7 @@ def get_classes():
             cursor.execute("SELECT id, class_name, class_password, image_url FROM classes WHERE school_id = %s ORDER BY id DESC", (school_id,))
             classes = cursor.fetchall()
             return jsonify({"status": "success", "classes": classes}), 200
-    except Exception as e:
+    except Exception:
         return jsonify({"status": "error", "classes": []}), 500
     finally:
         if connection: connection.close()
@@ -328,14 +353,14 @@ def create_class():
                     response = requests.post("https://catbox.moe/user/api.php", files=files, data=data)
                     if response.status_code == 200 and response.text.startswith("https://"):
                         image_url = response.text.strip()
-                except Exception as e:
+                except Exception:
                     pass
 
             cursor.execute("INSERT INTO classes (school_id, class_name, class_password, image_url) VALUES (%s, %s, %s, %s)", (school_id, class_name, class_password, image_url))
             connection.commit()
             return jsonify({"status": "success", "message": "تم إنشاء الفصل بنجاح"}), 200
     except Exception as e:
-        return jsonify({"status": "error", "message": f"خطأ: {str(e)}"}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if connection: connection.close()
 
@@ -353,7 +378,7 @@ def delete_class():
             cursor.execute("DELETE FROM classes WHERE id = %s AND school_id = %s", (class_id, school_id))
             connection.commit()
             return jsonify({"status": "success", "message": "تم الحذف بنجاح"}), 200
-    except Exception as e:
+    except Exception:
         return jsonify({"status": "error", "message": "خطأ في الحذف"}), 500
     finally:
         if connection: connection.close()
@@ -373,7 +398,7 @@ def update_class_password():
             cursor.execute("UPDATE classes SET class_password = %s WHERE id = %s AND school_id = %s", (new_password, class_id, school_id))
             connection.commit()
             return jsonify({"status": "success", "message": "تم تحديث كلمة السر بنجاح"}), 200
-    except Exception as e:
+    except Exception:
         return jsonify({"status": "error", "message": "خطأ في التحديث"}), 500
     finally:
         if connection: connection.close()
