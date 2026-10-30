@@ -22,9 +22,9 @@ cached_schools = []
 
 # دالة ذكية لتوزيع الأرقام على 5 قواعد (رقمين لكل قاعدة)
 def get_db_index(school_id):
-    if not school_id or not school_id[0].isdigit():
+    if not school_id or not str(school_id)[0].isdigit():
         return 0
-    first_digit = int(school_id[0])
+    first_digit = int(str(school_id)[0])
     return first_digit // 2 
 
 def get_db_connection(school_id=None):
