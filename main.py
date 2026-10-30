@@ -53,6 +53,7 @@ def get_db_connection(school_id=None):
         return None
 
 def create_tables_if_not_exist(cursor):
+    # إنشاء جدول المدارس الأساسي
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS schools (
             id SERIAL PRIMARY KEY,
@@ -63,6 +64,12 @@ def create_tables_if_not_exist(cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    
+    # ✅ إضافة الأعمدة الناقصة تلقائياً إذا كان الجدول موجوداً مسبقاً من نسخة قديمة
+    cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS admin_device_id VARCHAR(255);")
+    cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS admin_password VARCHAR(255) DEFAULT '123456';")
+
+    # جدول صور المدارس
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS school_images (
             school_id INT PRIMARY KEY REFERENCES schools(id) ON DELETE CASCADE,
@@ -70,6 +77,8 @@ def create_tables_if_not_exist(cursor):
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    
+    # جدول مفاتيح الأدمن
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS admin_keys (
             id SERIAL PRIMARY KEY,
@@ -78,6 +87,7 @@ def create_tables_if_not_exist(cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    
     # ✅ جدول الفصول الخاصة بكل مدرسة مع كلمة السر
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS classes (
