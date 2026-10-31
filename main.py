@@ -127,8 +127,9 @@ def refresh_cache():
         try:
             with connection.cursor() as cursor:
                 create_tables_if_not_exist(cursor)
+                # ✅ جلب البيانات كاملة بدقة لضمان مزامنة حالة الإغلاق والإيدي
                 cursor.execute("""
-                    SELECT s.school_id, s.school_name, s.admin_device_id, s.admin_password, s.is_closed, si.image_url,
+                    SELECT s.school_id, s.school_name, s.admin_device_id, s.admin_password, COALESCE(s.is_closed, 0) as is_closed, si.image_url,
                     (SELECT COUNT(*) FROM classes c WHERE c.school_id = s.school_id) as classes_count
                     FROM schools s 
                     LEFT JOIN school_images si ON s.id = si.school_id 
@@ -158,10 +159,10 @@ def verify_school():
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
-            cursor.execute("SELECT school_name FROM schools WHERE school_id = %s", (school_id,))
+            cursor.execute("SELECT school_name, COALESCE(is_closed, 0) as is_closed FROM schools WHERE school_id = %s", (school_id,))
             result = cursor.fetchone()
             if result:
-                return jsonify({"status": "success", "school_name": result['school_name'], "message": None}), 200
+                return jsonify({"status": "success", "school_name": result['school_name'], "is_closed": result['is_closed'], "message": None}), 200
             return jsonify({"status": "error", "school_name": None, "message": "الإيدي غير صحيح"}), 200
     except Exception:
         return jsonify({"status": "error", "school_name": None, "message": "خطأ داخلي في السيرفر"}), 500
@@ -219,7 +220,7 @@ def update_school_admin_password():
     finally:
         if connection: connection.close()
 
-# ✅ التحكم بحالة المدرسة (إغلاق / فتح)
+# ✅ التحكم بحالة المدرسة (إغلاق / فتح) وتحديث الكاش فوراً بضمان كامل
 @app.route('/set_school_status', methods=['POST'])
 def set_school_status():
     school_id = request.values.get('school_id')
@@ -239,8 +240,8 @@ def set_school_status():
             else:
                 cursor.execute("UPDATE schools SET is_closed = 0 WHERE school_id = %s", (school_id,))
             connection.commit()
-            refresh_cache()
-            return jsonify({"status": "success", "message": "تم تحديث حالة المدرسة"}), 200
+            refresh_cache()  # تحديث الكاش الفوري لكي يتعرف السيرفر والتطبيق على حالة الإغلاق الجديدة
+            return jsonify({"status": "success", "message": "تم تحديث حالة المدرسة بنجاح"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
@@ -260,6 +261,27 @@ def verify_school_close_pass():
             if row and row['close_password'] == password:
                 return jsonify({"status": "success", "message": "كلمة السر صحيحة"}), 200
             return jsonify({"status": "error", "message": "كلمة السر غير صحيحة"}), 401
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+# ✅ جلب تفاصيل المدرسة المحدثة (تأكيد حالة الإغلاق والإيدي الحقيقي من قاعدة البيانات)
+@app.route('/get_school_details', methods=['POST'])
+def get_school_details():
+    school_id = request.values.get('school_id')
+    if not school_id:
+        return jsonify({"status": "error", "message": "إيدي المدرسة مطلوب"}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT school_id, school_name, COALESCE(is_closed, 0) as is_closed FROM schools WHERE school_id = %s", (school_id,))
+            school = cursor.fetchone()
+            if school:
+                return jsonify({"status": "success", "school": school}), 200
+            return jsonify({"status": "error", "message": "المدرسة غير موجودة"}), 404
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
@@ -422,6 +444,7 @@ def create_school():
 
 @app.route('/get_schools', methods=['GET'])
 def get_schools():
+    refresh_cache()  # تحديث الكاش عند كل جلب لضمان أحدث حالة للمدارس المغلقة
     return jsonify({"status": "success", "schools": cached_schools}), 200
 
 @app.route('/get_classes', methods=['POST'])
@@ -497,7 +520,7 @@ def delete_class():
             connection.commit()
             refresh_cache()
             return jsonify({"status": "success", "message": "تم الحذف بنجاح"}), 200
-    except Exception:
+    exceptException:
         return jsonify({"status": "error", "message": "خطأ في الحذف"}), 500
     finally:
         if connection: connection.close()
