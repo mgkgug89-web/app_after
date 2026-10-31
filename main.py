@@ -55,11 +55,15 @@ def create_tables_if_not_exist(cursor):
             school_name VARCHAR(255) NOT NULL,
             admin_device_id VARCHAR(255),
             admin_password VARCHAR(255) DEFAULT '123456',
+            is_closed SMALLINT DEFAULT 0,
+            close_password VARCHAR(255) DEFAULT '1234',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS admin_device_id VARCHAR(255);")
     cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS admin_password VARCHAR(255) DEFAULT '123456';")
+    cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS is_closed SMALLINT DEFAULT 0;")
+    cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS close_password VARCHAR(255) DEFAULT '1234';")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS school_images (
@@ -78,7 +82,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
     
-    # ✅ جدول الفصول الخاصة بكل مدرسة مع حمايتها بكلمة سر
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS classes (
             id SERIAL PRIMARY KEY,
@@ -86,6 +89,17 @@ def create_tables_if_not_exist(cursor):
             class_name VARCHAR(100) NOT NULL,
             class_password VARCHAR(100) NOT NULL,
             image_url TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # ✅ جدول طلبات الزوار
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS visitors (
+            id SERIAL PRIMARY KEY,
+            school_id VARCHAR(6) NOT NULL,
+            visitor_device_id VARCHAR(255) NOT NULL,
+            status VARCHAR(50) DEFAULT 'pending',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -114,7 +128,8 @@ def refresh_cache():
             with connection.cursor() as cursor:
                 create_tables_if_not_exist(cursor)
                 cursor.execute("""
-                    SELECT s.school_id, s.school_name, s.admin_device_id, s.admin_password, si.image_url 
+                    SELECT s.school_id, s.school_name, s.admin_device_id, s.admin_password, s.is_closed, si.image_url,
+                    (SELECT COUNT(*) FROM classes c WHERE c.school_id = s.school_id) as classes_count
                     FROM schools s 
                     LEFT JOIN school_images si ON s.id = si.school_id 
                     ORDER BY s.id DESC
@@ -204,6 +219,109 @@ def update_school_admin_password():
     finally:
         if connection: connection.close()
 
+# ✅ التحكم بحالة المدرسة (إغلاق / فتح)
+@app.route('/set_school_status', methods=['POST'])
+def set_school_status():
+    school_id = request.values.get('school_id')
+    is_closed = request.values.get('is_closed')
+    close_password = request.values.get('close_password', '1234')
+
+    if not school_id or is_closed is None:
+        return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
+
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            if int(is_closed) == 1:
+                cursor.execute("UPDATE schools SET is_closed = 1, close_password = %s WHERE school_id = %s", (close_password, school_id))
+            else:
+                cursor.execute("UPDATE schools SET is_closed = 0 WHERE school_id = %s", (school_id,))
+            connection.commit()
+            refresh_cache()
+            return jsonify({"status": "success", "message": "تم تحديث حالة المدرسة"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+@app.route('/verify_school_close_pass', methods=['POST'])
+def verify_school_close_pass():
+    school_id = request.values.get('school_id')
+    password = request.values.get('password')
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT close_password FROM schools WHERE school_id = %s", (school_id,))
+            row = cursor.fetchone()
+            if row and row['close_password'] == password:
+                return jsonify({"status": "success", "message": "كلمة السر صحيحة"}), 200
+            return jsonify({"status": "error", "message": "كلمة السر غير صحيحة"}), 401
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+# ✅ إدارة طلبات الزوار
+@app.route('/request_visit', methods=['POST'])
+def request_visit():
+    school_id = request.values.get('school_id')
+    visitor_device_id = request.values.get('visitor_device_id')
+    if not school_id or not visitor_device_id:
+        return jsonify({"status": "error", "message": "بيانات غير كافية"}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            cursor.execute("INSERT INTO visitors (school_id, visitor_device_id) VALUES (%s, %s)", (school_id, visitor_device_id))
+            connection.commit()
+            return jsonify({"status": "success", "message": "تم إرسال الطلب بنجاح"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+@app.route('/get_visitors', methods=['POST', 'GET'])
+def get_visitors():
+    school_id = request.values.get('school_id')
+    if not school_id:
+        return jsonify({"status": "error", "visitors": []}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "visitors": []}), 500
+    try:
+        with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            cursor.execute("SELECT id, visitor_device_id, status FROM visitors WHERE school_id = %s AND status = 'pending' ORDER BY id DESC", (school_id,))
+            visitors = cursor.fetchall()
+            return jsonify({"status": "success", "visitors": visitors}), 200
+    except Exception:
+        return jsonify({"status": "error", "visitors": []}), 500
+    finally:
+        if connection: connection.close()
+
+@app.route('/approve_visitor', methods=['POST'])
+def approve_visitor():
+    school_id = request.values.get('school_id')
+    visitor_id = request.values.get('visitor_id')
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE visitors SET status = 'approved' WHERE id = %s", (visitor_id,))
+            connection.commit()
+            return jsonify({"status": "success", "message": "تمت الموافقة"}), 200
+    except Exception:
+        return jsonify({"status": "error", "message": "خطأ"}), 500
+    finally:
+        if connection: connection.close()
+
 @app.route('/generate_key', methods=['GET'])
 def generate_key():
     alphabet = string.ascii_uppercase + string.digits
@@ -286,7 +404,7 @@ def create_school():
                 except Exception:
                     pass
 
-            cursor.execute("INSERT INTO schools (school_id, school_name, admin_device_id, admin_password) VALUES (%s, %s, %s, %s) RETURNING id", (school_id, school_name, device_id, "123456"))
+            cursor.execute("INSERT INTO schools (school_id, school_name, admin_device_id, admin_password, is_closed) VALUES (%s, %s, %s, %s, 0) RETURNING id", (school_id, school_name, device_id, "123456"))
             new_school_db_id = cursor.fetchone()['id']
 
             if image_url:
@@ -306,7 +424,6 @@ def create_school():
 def get_schools():
     return jsonify({"status": "success", "schools": cached_schools}), 200
 
-# ✅ إدارة الفصول الخاصة بكل مدرسة حصرياً
 @app.route('/get_classes', methods=['POST'])
 def get_classes():
     school_id = request.values.get('school_id')
@@ -358,6 +475,7 @@ def create_class():
 
             cursor.execute("INSERT INTO classes (school_id, class_name, class_password, image_url) VALUES (%s, %s, %s, %s)", (school_id, class_name, class_password, image_url))
             connection.commit()
+            refresh_cache()
             return jsonify({"status": "success", "message": "تم إنشاء الفصل بنجاح"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -377,6 +495,7 @@ def delete_class():
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM classes WHERE id = %s AND school_id = %s", (class_id, school_id))
             connection.commit()
+            refresh_cache()
             return jsonify({"status": "success", "message": "تم الحذف بنجاح"}), 200
     except Exception:
         return jsonify({"status": "error", "message": "خطأ في الحذف"}), 500
