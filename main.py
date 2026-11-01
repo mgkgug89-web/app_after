@@ -93,7 +93,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # ✅ جدول طلبات الزوار
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS visitors (
             id SERIAL PRIMARY KEY,
@@ -101,6 +100,20 @@ def create_tables_if_not_exist(cursor):
             visitor_device_id VARCHAR(255) NOT NULL,
             status VARCHAR(50) DEFAULT 'pending',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # ✅ جدول جديد لحفظ ملفات الطلاب الشخصية المرتبطة بمعلومات الجوال والصورة والسيرفر بشكل دائم
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS student_profiles (
+            id SERIAL PRIMARY KEY,
+            device_id VARCHAR(255) NOT NULL UNIQUE,
+            user_id VARCHAR(50),
+            full_name VARCHAR(255),
+            age VARCHAR(50),
+            school_name VARCHAR(255),
+            image_url TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -127,7 +140,6 @@ def refresh_cache():
         try:
             with connection.cursor() as cursor:
                 create_tables_if_not_exist(cursor)
-                # ✅ جلب البيانات كاملة بدقة لضمان مزامنة حالة الإغلاق والإيدي
                 cursor.execute("""
                     SELECT s.school_id, s.school_name, s.admin_device_id, s.admin_password, COALESCE(s.is_closed, 0) as is_closed, si.image_url,
                     (SELECT COUNT(*) FROM classes c WHERE c.school_id = s.school_id) as classes_count
@@ -147,6 +159,93 @@ def refresh_cache():
 init_all_databases()
 refresh_cache()
 
+# ========================================================
+# ✅ مسارات حفظ وجلب بيانات الطالب الشخصية (معلومات الجوال والصورة)
+# ========================================================
+@app.route('/save_user_profile', methods=['POST'])
+def save_user_profile():
+    device_id = request.values.get('device_id')
+    user_id = request.values.get('user_id')
+    full_name = request.values.get('full_name')
+    age = request.values.get('age')
+    school_name = request.values.get('school_name')
+    image_base64 = request.values.get('image_base64', '')
+
+    if not device_id:
+        return jsonify({"status": "error", "message": "معرف الجهاز مطلوب"}), 400
+
+    connection = get_db_connection("0")
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال بقاعدة البيانات"}), 500
+
+    try:
+        with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            
+            # رفع الصورة الجديدة إن وجدت عبر Catbox
+            image_url = None
+            if image_base64:
+                try:
+                    if "," in image_base64:
+                        image_base64 = image_base64.split(",")[1]
+                    image_bytes = base64.b64decode(image_base64)
+                    files = {'fileToUpload': ('student_profile.jpg', image_bytes, 'image/jpeg')}
+                    data = {'reqtype': 'fileupload'}
+                    response = requests.post("https://catbox.moe/user/api.php", files=files, data=data)
+                    if response.status_code == 200 and response.text.startswith("https://"):
+                        image_url = response.text.strip()
+                except Exception:
+                    pass
+
+            # التحقق مما إذا كان الملف موجوداً مسبقاً للجهاز
+            cursor.execute("SELECT image_url FROM student_profiles WHERE device_id = %s", (device_id,))
+            existing = cursor.fetchone()
+            if not image_url and existing:
+                image_url = existing['image_url']
+
+            cursor.execute("""
+                INSERT INTO student_profiles (device_id, user_id, full_name, age, school_name, image_url, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (device_id) DO UPDATE SET
+                    user_id = EXCLUDED.user_id,
+                    full_name = EXCLUDED.full_name,
+                    age = EXCLUDED.age,
+                    school_name = EXCLUDED.school_name,
+                    image_url = COALESCE(EXCLUDED.image_url, student_profiles.image_url),
+                    updated_at = CURRENT_TIMESTAMP
+            """, (device_id, user_id, full_name, age, school_name, image_url))
+            
+            connection.commit()
+            return jsonify({"status": "success", "message": "تم حفظ ملف الطالب بنجاح", "image_url": image_url}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+@app.route('/get_user_profile', methods=['POST'])
+def get_user_profile():
+    device_id = request.values.get('device_id')
+    if not device_id:
+        return jsonify({"status": "error", "message": "معرف الجهاز مطلوب"}), 400
+
+    connection = get_db_connection("0")
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+
+    try:
+        with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            cursor.execute("SELECT device_id, user_id, full_name, age, school_name, image_url FROM student_profiles WHERE device_id = %s", (device_id,))
+            profile = cursor.fetchone()
+            if profile:
+                return jsonify({"status": "success", "profile": profile}), 200
+            return jsonify({"status": "error", "profile": None, "message": "لا توجد بيانات محفوظة لهذا الجهاز"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+# (باقي المسارات الخاصة بالمدارس والفصول كما هي بدون تغيير)
 @app.route('/verify', methods=['POST'])
 def verify_school():
     school_id = request.values.get('school_id')
@@ -220,7 +319,6 @@ def update_school_admin_password():
     finally:
         if connection: connection.close()
 
-# ✅ التحكم بحالة المدرسة (إغلاق / فتح) وتحديث الكاش فوراً بضمان كامل
 @app.route('/set_school_status', methods=['POST'])
 def set_school_status():
     school_id = request.values.get('school_id')
@@ -240,7 +338,7 @@ def set_school_status():
             else:
                 cursor.execute("UPDATE schools SET is_closed = 0 WHERE school_id = %s", (school_id,))
             connection.commit()
-            refresh_cache()  # تحديث الكاش الفوري لكي يتعرف السيرفر والتطبيق على حالة الإغلاق الجديدة
+            refresh_cache()
             return jsonify({"status": "success", "message": "تم تحديث حالة المدرسة بنجاح"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -266,7 +364,6 @@ def verify_school_close_pass():
     finally:
         if connection: connection.close()
 
-# ✅ جلب تفاصيل المدرسة المحدثة (تأكيد حالة الإغلاق والإيدي الحقيقي من قاعدة البيانات)
 @app.route('/get_school_details', methods=['POST'])
 def get_school_details():
     school_id = request.values.get('school_id')
@@ -287,7 +384,6 @@ def get_school_details():
     finally:
         if connection: connection.close()
 
-# ✅ إدارة طلبات الزوار
 @app.route('/request_visit', methods=['POST'])
 def request_visit():
     school_id = request.values.get('school_id')
@@ -444,7 +540,7 @@ def create_school():
 
 @app.route('/get_schools', methods=['GET'])
 def get_schools():
-    refresh_cache()  # تحديث الكاش عند كل جلب لضمان أحدث حالة للمدارس المغلقة
+    refresh_cache()
     return jsonify({"status": "success", "schools": cached_schools}), 200
 
 @app.route('/get_classes', methods=['POST'])
@@ -520,7 +616,7 @@ def delete_class():
             connection.commit()
             refresh_cache()
             return jsonify({"status": "success", "message": "تم الحذف بنجاح"}), 200
-    exceptException:
+    except Exception:
         return jsonify({"status": "error", "message": "خطأ في الحذف"}), 500
     finally:
         if connection: connection.close()
