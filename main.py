@@ -103,7 +103,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # ✅ جدول جديد لحفظ ملفات الطلاب الشخصية المرتبطة بمعلومات الجوال والصورة والسيرفر بشكل دائم
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS student_profiles (
             id SERIAL PRIMARY KEY,
@@ -159,9 +158,6 @@ def refresh_cache():
 init_all_databases()
 refresh_cache()
 
-# ========================================================
-# ✅ مسارات حفظ وجلب بيانات الطالب الشخصية (معلومات الجوال والصورة)
-# ========================================================
 @app.route('/save_user_profile', methods=['POST'])
 def save_user_profile():
     device_id = request.values.get('device_id')
@@ -182,7 +178,6 @@ def save_user_profile():
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
             
-            # رفع الصورة الجديدة إن وجدت عبر Catbox
             image_url = None
             if image_base64:
                 try:
@@ -197,7 +192,6 @@ def save_user_profile():
                 except Exception:
                     pass
 
-            # التحقق مما إذا كان الملف موجوداً مسبقاً للجهاز
             cursor.execute("SELECT image_url FROM student_profiles WHERE device_id = %s", (device_id,))
             existing = cursor.fetchone()
             if not image_url and existing:
@@ -207,7 +201,7 @@ def save_user_profile():
                 INSERT INTO student_profiles (device_id, user_id, full_name, age, school_name, image_url, updated_at)
                 VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT (device_id) DO UPDATE SET
-                    user_id = EXCLUDED.user_id,
+                    user_id = COALESCE(EXCLUDED.user_id, student_profiles.user_id),
                     full_name = EXCLUDED.full_name,
                     age = EXCLUDED.age,
                     school_name = EXCLUDED.school_name,
@@ -245,7 +239,6 @@ def get_user_profile():
     finally:
         if connection: connection.close()
 
-# (باقي المسارات الخاصة بالمدارس والفصول كما هي بدون تغيير)
 @app.route('/verify', methods=['POST'])
 def verify_school():
     school_id = request.values.get('school_id')
