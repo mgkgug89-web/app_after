@@ -21,7 +21,6 @@ app.json.ensure_ascii = False
 ADMIN_SECRET_PASSWORD = "2573486195715653N"
 cached_schools = []
 
-# 🆕 مفاتيح LiveKit
 LIVEKIT_API_KEY = "APIbmfvPM9vQA4s"
 LIVEKIT_API_SECRET = "8p7SAFQiWjhr5YN86h4fnuwILLcMAZ1fkgYn4ri4rvE"
 LIVEKIT_URL = "wss://distancelearning-mlptg6d9.livekit.cloud"
@@ -128,7 +127,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # جدول المعلمين - يدعم teacher_id و teacher_user_id
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS class_teachers (
             id SERIAL PRIMARY KEY,
@@ -159,6 +157,7 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
+    # 🆕 جدول mic_requests مع request_type
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mic_requests (
             id SERIAL PRIMARY KEY,
@@ -168,8 +167,27 @@ def create_tables_if_not_exist(cursor):
             student_user_id VARCHAR(50),
             student_name VARCHAR(255),
             student_image TEXT,
+            request_type VARCHAR(20) DEFAULT 'mic',
             status VARCHAR(50) DEFAULT 'pending',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    try:
+        cursor.execute("ALTER TABLE mic_requests ADD COLUMN IF NOT EXISTS request_type VARCHAR(20) DEFAULT 'mic';")
+    except Exception:
+        pass
+
+    # 🆕 جدول صلاحيات الطالب (بعد موافقة المعلم)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS class_permissions (
+            id SERIAL PRIMARY KEY,
+            school_id VARCHAR(6) NOT NULL,
+            class_id INT NOT NULL,
+            student_user_id VARCHAR(50) NOT NULL,
+            can_mic SMALLINT DEFAULT 0,
+            can_video SMALLINT DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(school_id, class_id, student_user_id)
         )
     """)
 
@@ -227,7 +245,7 @@ refresh_cache()
 
 
 # ============================================================
-# 🆕 LiveKit Room Service (لإدارة الغرف والمشاركين)
+# 🆕 LiveKit Room Service
 # ============================================================
 def get_livekit_room_service():
     try:
@@ -242,7 +260,7 @@ def get_livekit_room_service():
 
 
 # ============================================================
-# 🆕 توليد توكن LiveKit (محسّن لاستقرار الصوت)
+# 🆕 توليد توكن LiveKit
 # ============================================================
 @app.route('/get_livekit_token', methods=['POST'])
 def get_livekit_token():
@@ -258,7 +276,6 @@ def get_livekit_token():
     room_name = f"class_{school_id}_{class_id}"
 
     try:
-        # 🆕 توكن محسّن مع metadata
         token = api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET) \
             .with_identity(user_id) \
             .with_name(user_name) \
@@ -286,25 +303,20 @@ def get_livekit_token():
 
 
 # ============================================================
-# 🆕 جلب معلومات الغرفة (للتشخيص)
+# 🆕 جلب معلومات الغرفة
 # ============================================================
 @app.route('/get_room_info', methods=['POST', 'GET'])
 def get_room_info():
     school_id = request.values.get('school_id')
     class_id = request.values.get('class_id')
-
     if not school_id or not class_id:
         return jsonify({"status": "error", "message": "بيانات ناقصة"}), 400
-
     room_name = f"class_{school_id}_{class_id}"
-
     try:
         client = get_livekit_room_service()
         if not client:
             return jsonify({"status": "error", "message": "LiveKit RoomService غير متاح"}), 500
-
         try:
-            room = client.list_rooms()
             participants = client.list_participants(room=room_name)
             participants_list = []
             for p in participants:
@@ -314,7 +326,6 @@ def get_room_info():
                     "state": str(p.state),
                     "joined_at": p.joined_at,
                 })
-
             return jsonify({
                 "status": "success",
                 "room": room_name,
@@ -327,44 +338,32 @@ def get_room_info():
                 "room": room_name,
                 "participants": [],
                 "count": 0,
-                "note": f"الغرفة فارغة أو غير موجودة: {str(e)}"
+                "note": f"الغرفة فارغة: {str(e)}"
             }), 200
-
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # ============================================================
-# 🆕 إزالة مشارك من LiveKit Room (أقوى من kick_user)
+# 🆕 إزالة مشارك
 # ============================================================
 @app.route('/remove_participant', methods=['POST'])
 def remove_participant():
     school_id = request.values.get('school_id')
     class_id = request.values.get('class_id')
     user_id = request.values.get('user_id')
-
     if not school_id or not class_id or not user_id:
         return jsonify({"status": "error", "message": "بيانات ناقصة"}), 400
-
     room_name = f"class_{school_id}_{class_id}"
-
     try:
         client = get_livekit_room_service()
         if not client:
             return jsonify({"status": "error", "message": "LiveKit RoomService غير متاح"}), 500
-
         try:
             client.remove_participant(room=room_name, identity=user_id)
-            return jsonify({
-                "status": "success",
-                "message": f"تم إزالة {user_id} من الغرفة",
-            }), 200
+            return jsonify({"status": "success", "message": f"تم إزالة {user_id}"}), 200
         except Exception as e:
-            return jsonify({
-                "status": "error",
-                "message": f"لم يتم العثور على المشارك: {str(e)}",
-            }), 404
-
+            return jsonify({"status": "error", "message": f"لم يتم العثور على المشارك: {str(e)}"}), 404
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -377,93 +376,27 @@ def fix_all_tables():
     secret = request.values.get('secret')
     if secret != ADMIN_SECRET_PASSWORD:
         return jsonify({"status": "error", "message": "غير مصرح"}), 401
-
     results = []
     all_success = True
-
     for i in range(5):
         conn = get_db_connection(str(i * 2))
         if not conn:
             results.append({"db_index": i, "status": "skipped", "reason": "no connection"})
             all_success = False
             continue
-
         db_result = {"db_index": i, "steps": {}}
-
         try:
             cursor = conn.cursor()
-
             try:
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS class_teachers (
-                        id SERIAL PRIMARY KEY,
-                        teacher_user_id VARCHAR(50),
-                        class_id INT NOT NULL,
-                        school_id VARCHAR(6) NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                """)
+                create_tables_if_not_exist(cursor)
                 conn.commit()
-                db_result["steps"]["create_table"] = "success"
+                db_result["steps"]["create_tables"] = "success"
             except Exception as e:
                 conn.rollback()
-                db_result["steps"]["create_table"] = f"error: {str(e)}"
-
-            try:
-                cursor.execute("ALTER TABLE class_teachers ADD COLUMN IF NOT EXISTS teacher_user_id VARCHAR(50);")
-                conn.commit()
-                db_result["steps"]["add_column"] = "success"
-            except Exception as e:
-                conn.rollback()
-                db_result["steps"]["add_column"] = f"error: {str(e)}"
-
-            try:
-                cursor.execute("ALTER TABLE class_teachers ALTER COLUMN teacher_id DROP NOT NULL;")
-                conn.commit()
-                db_result["steps"]["drop_not_null_teacher_id"] = "success"
-            except Exception as e:
-                conn.rollback()
-                db_result["steps"]["drop_not_null_teacher_id"] = f"error: {str(e)}"
-
-            try:
-                cursor.execute("""
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1 FROM pg_constraint 
-                            WHERE conname = 'class_teachers_unique_idx'
-                        ) THEN
-                            ALTER TABLE class_teachers 
-                            ADD CONSTRAINT class_teachers_unique_idx 
-                            UNIQUE (teacher_user_id, class_id);
-                        END IF;
-                    EXCEPTION WHEN OTHERS THEN
-                        NULL;
-                    END $$;
-                """)
-                conn.commit()
-                db_result["steps"]["add_constraint"] = "success"
-            except Exception as e:
-                conn.rollback()
-                db_result["steps"]["add_constraint"] = f"error: {str(e)}"
-
-            try:
-                cursor.execute("""
-                    SELECT column_name FROM information_schema.columns 
-                    WHERE table_name = 'class_teachers' AND column_name = 'teacher_user_id'
-                """)
-                has_col = cursor.fetchone() is not None
-                db_result["teacher_user_id_exists"] = has_col
-                if not has_col:
-                    all_success = False
-            except Exception as e:
-                db_result["verification_error"] = str(e)
-                all_success = False
-
+                db_result["steps"]["create_tables"] = f"error: {str(e)}"
             cursor.close()
             db_result["status"] = "success"
             results.append(db_result)
-
         except Exception as e:
             try:
                 conn.rollback()
@@ -473,10 +406,9 @@ def fix_all_tables():
             all_success = False
         finally:
             if conn: conn.close()
-
     return jsonify({
         "status": "success" if all_success else "partial",
-        "message": "✅ تم إصلاح جميع الجداول بنجاح!" if all_success else "⚠️ تم الإصلاح جزئياً - راجع النتائج",
+        "message": "✅ تم إصلاح جميع الجداول بنجاح!" if all_success else "⚠️ تم الإصلاح جزئياً",
         "results": results
     }), 200
 
@@ -489,13 +421,11 @@ def check_user_id():
     user_id = request.values.get('user_id')
     if not user_id:
         return jsonify({"status": "error", "message": "الرجاء إرسال user_id"}), 400
-
     variants = [user_id]
     if not user_id.startswith("STU-"):
         variants.append(f"STU-{user_id}")
     else:
         variants.append(user_id.replace("STU-", ""))
-
     results = {}
     for i in range(5):
         conn = get_db_connection(str(i * 2))
@@ -519,7 +449,6 @@ def check_user_id():
                             }
                     except Exception as e:
                         results[f"DB_{i}_student_profiles_error"] = str(e)
-
                     try:
                         cursor.execute("SELECT school_id, class_id, device_id, user_id, last_seen FROM class_presence WHERE user_id = %s", (variant,))
                         presences = cursor.fetchall()
@@ -530,7 +459,6 @@ def check_user_id():
                             ]
                     except Exception as e:
                         results[f"DB_{i}_class_presence_error"] = str(e)
-
                     try:
                         cursor.execute("SELECT id, school_id, class_id, student_name FROM mic_requests WHERE student_user_id = %s", (variant,))
                         mics = cursor.fetchall()
@@ -541,7 +469,6 @@ def check_user_id():
                             ]
                     except Exception as e:
                         results[f"DB_{i}_mic_requests_error"] = str(e)
-
                     try:
                         cursor.execute("SELECT teacher_user_id, class_id, school_id FROM class_teachers WHERE teacher_user_id = %s", (variant,))
                         teachers = cursor.fetchall()
@@ -556,17 +483,14 @@ def check_user_id():
             results[f"DB_{i}_error"] = str(e)
         finally:
             conn.close()
-
     if not results:
         return jsonify({
             "status": "not_found",
-            "message": f"❌ الـ ID '{user_id}' غير موجود في أي جدول بأي قاعدة بيانات",
+            "message": f"❌ الـ ID '{user_id}' غير موجود",
             "searched_variants": variants
         }), 200
-
     has_errors = any("error" in key.lower() for key in results.keys())
     has_data = any("student_profiles" in key or "class_presence" in key or "class_teachers" in key for key in results.keys())
-
     if has_errors and not has_data:
         return jsonify({
             "status": "error",
@@ -574,10 +498,9 @@ def check_user_id():
             "errors": {k: v for k, v in results.items() if "error" in k.lower()},
             "hint": "قم بتنفيذ /fix_all_tables أولاً"
         }), 200
-
     return jsonify({
         "status": "found",
-        "message": "✅ تم العثور على الـ ID في قاعدة البيانات",
+        "message": "✅ تم العثور على الـ ID",
         "user_id": user_id,
         "searched_variants": variants,
         "results": results
@@ -592,7 +515,6 @@ def migrate_user_ids():
     secret = request.values.get('secret')
     if secret != ADMIN_SECRET_PASSWORD:
         return jsonify({"status": "error", "message": "غير مصرح"}), 401
-
     results = []
     for i in range(5):
         conn = get_db_connection(str(i * 2))
@@ -608,7 +530,6 @@ def migrate_user_ids():
                       AND LENGTH(user_id) = 6
                 """)
                 cnt1 = cursor.rowcount
-
                 cursor.execute("""
                     UPDATE class_presence 
                     SET user_id = 'STU-' || user_id 
@@ -617,7 +538,6 @@ def migrate_user_ids():
                       AND LENGTH(user_id) = 6
                 """)
                 cnt2 = cursor.rowcount
-
                 cursor.execute("""
                     UPDATE mic_requests 
                     SET student_user_id = 'STU-' || student_user_id 
@@ -626,7 +546,6 @@ def migrate_user_ids():
                       AND LENGTH(student_user_id) = 6
                 """)
                 cnt3 = cursor.rowcount
-
                 try:
                     cursor.execute("""
                         UPDATE class_teachers 
@@ -638,7 +557,6 @@ def migrate_user_ids():
                     cnt4 = cursor.rowcount
                 except Exception:
                     cnt4 = 0
-
                 conn.commit()
                 results.append({
                     "db_index": i,
@@ -651,7 +569,6 @@ def migrate_user_ids():
             results.append({"db_index": i, "error": str(e)})
         finally:
             conn.close()
-
     return jsonify({"status": "success", "results": results}), 200
 
 
@@ -660,7 +577,6 @@ def check_device_id():
     device_id = request.values.get('device_id')
     if not device_id:
         return jsonify({"status": "error", "message": "الرجاء إرسال device_id"}), 400
-
     connection = get_db_connection("0")
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
@@ -684,7 +600,7 @@ def check_device_id():
                 }), 200
             return jsonify({
                 "status": "not_found",
-                "message": f"❌ الـ device_id '{device_id}' غير موجود في القاعدة"
+                "message": f"❌ الـ device_id '{device_id}' غير موجود"
             }), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -799,8 +715,7 @@ def verify_admin():
     password = request.values.get('password')
     if password == ADMIN_SECRET_PASSWORD:
         return jsonify({"status": "success", "message": "تم التحقق"}), 200
-    else:
-        return jsonify({"status": "error", "message": "كلمة السر غير صحيحة"}), 401
+    return jsonify({"status": "error", "message": "كلمة السر غير صحيحة"}), 401
 
 
 @app.route('/verify_school_admin', methods=['POST'])
@@ -1025,17 +940,17 @@ def create_school():
         finally:
             if conn: conn.close()
     if not school_id:
-        return jsonify({"status": "error", "message": "فشل في توليد إيدي، حاول مرة أخرى"}), 500
+        return jsonify({"status": "error", "message": "فشل في توليد إيدي"}), 500
     connection = get_db_connection(school_id)
     if not connection:
-        return jsonify({"status": "error", "message": "خطأ في الاتصال بقاعدة البيانات"}), 500
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
             cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s AND is_used = 0", (admin_password.strip(),))
             key_row = cursor.fetchone()
             if not key_row:
-                return jsonify({"status": "error", "message": "كلمة السر غير صحيحة أو تم استخدامها مسبقاً!"}), 400
+                return jsonify({"status": "error", "message": "كلمة السر غير صحيحة أو مستخدمة"}), 400
             image_url = ""
             if image_base64:
                 try:
@@ -1172,7 +1087,7 @@ def update_class_password():
 
 
 # ============================================================
-# 🆕 register_teachers - النسخة النهائية
+# ✅ register_teachers
 # ============================================================
 @app.route('/register_teachers', methods=['POST'])
 def register_teachers():
@@ -1181,162 +1096,61 @@ def register_teachers():
     teacher_ids = request.values.get('teacher_ids', '')
     if not school_id or not class_id or not teacher_ids:
         return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
-
     connection = get_db_connection(school_id)
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
-
     try:
         ids_list = [tid.strip() for tid in teacher_ids.split(",") if tid.strip()]
         if not ids_list:
             return jsonify({"status": "error", "message": "لا توجد IDs صالحة"}), 400
-
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
-
-            # اكتشاف بنية الجدول
-            cursor.execute("""
-                SELECT column_name FROM information_schema.columns 
-                WHERE table_name = 'class_teachers'
-            """)
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'class_teachers'")
             existing_columns = [row['column_name'] for row in cursor.fetchall()]
             has_teacher_id = 'teacher_id' in existing_columns
             has_teacher_user_id = 'teacher_user_id' in existing_columns
-
             added_count = 0
             invalid_ids = []
-            failed_inserts = []
-
             for raw_tid in ids_list:
                 tid = raw_tid
                 found_id = None
-
-                # البحث في student_profiles
                 cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s LIMIT 1", (tid,))
                 r = cursor.fetchone()
-                if r:
-                    found_id = r['user_id']
-
+                if r: found_id = r['user_id']
                 if not found_id and not tid.startswith("STU-"):
-                    alt = f"STU-{tid}"
-                    cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s LIMIT 1", (alt,))
+                    cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s LIMIT 1", (f"STU-{tid}",))
                     r = cursor.fetchone()
-                    if r:
-                        found_id = r['user_id']
-
+                    if r: found_id = r['user_id']
                 if not found_id and tid.startswith("STU-"):
-                    alt = tid.replace("STU-", "")
-                    cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s LIMIT 1", (alt,))
+                    cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s LIMIT 1", (tid.replace("STU-", ""),))
                     r = cursor.fetchone()
-                    if r:
-                        found_id = r['user_id']
-
-                # البحث في class_presence
-                if not found_id:
-                    cursor.execute("SELECT user_id FROM class_presence WHERE user_id = %s AND class_id = %s LIMIT 1", (tid, int(class_id)))
-                    r = cursor.fetchone()
-                    if r:
-                        found_id = r['user_id']
-                if not found_id and not tid.startswith("STU-"):
-                    alt = f"STU-{tid}"
-                    cursor.execute("SELECT user_id FROM class_presence WHERE user_id = %s AND class_id = %s LIMIT 1", (alt, int(class_id)))
-                    r = cursor.fetchone()
-                    if r:
-                        found_id = r['user_id']
-                if not found_id and tid.startswith("STU-"):
-                    alt = tid.replace("STU-", "")
-                    cursor.execute("SELECT user_id FROM class_presence WHERE user_id = %s AND class_id = %s LIMIT 1", (alt, int(class_id)))
-                    r = cursor.fetchone()
-                    if r:
-                        found_id = r['user_id']
-
-                # البحث في mic_requests
-                if not found_id:
-                    cursor.execute("SELECT student_user_id FROM mic_requests WHERE student_user_id = %s LIMIT 1", (tid,))
-                    r = cursor.fetchone()
-                    if r:
-                        found_id = r['student_user_id']
-
+                    if r: found_id = r['user_id']
                 if not found_id:
                     invalid_ids.append(tid)
                     continue
-
                 try:
                     if has_teacher_user_id:
-                        cursor.execute(
-                            "SELECT id FROM class_teachers WHERE teacher_user_id = %s AND class_id = %s",
-                            (found_id, int(class_id))
-                        )
-                        existing = cursor.fetchone()
-                        if existing:
+                        cursor.execute("SELECT id FROM class_teachers WHERE teacher_user_id = %s AND class_id = %s", (found_id, int(class_id)))
+                        if cursor.fetchone():
                             continue
-                    elif has_teacher_id:
-                        cursor.execute(
-                            "SELECT id FROM class_teachers WHERE teacher_id = %s AND class_id = %s",
-                            (found_id, int(class_id))
-                        )
-                        existing = cursor.fetchone()
-                        if existing:
-                            continue
-
                     if has_teacher_id and has_teacher_user_id:
-                        cursor.execute("""
-                            INSERT INTO class_teachers (teacher_id, teacher_user_id, class_id, school_id)
-                            VALUES (%s, %s, %s, %s)
-                        """, (found_id, found_id, int(class_id), school_id))
+                        cursor.execute("INSERT INTO class_teachers (teacher_id, teacher_user_id, class_id, school_id) VALUES (%s, %s, %s, %s)", (found_id, found_id, int(class_id), school_id))
                     elif has_teacher_user_id:
-                        cursor.execute("""
-                            INSERT INTO class_teachers (teacher_user_id, class_id, school_id)
-                            VALUES (%s, %s, %s)
-                        """, (found_id, int(class_id), school_id))
+                        cursor.execute("INSERT INTO class_teachers (teacher_user_id, class_id, school_id) VALUES (%s, %s, %s)", (found_id, int(class_id), school_id))
                     elif has_teacher_id:
-                        cursor.execute("""
-                            INSERT INTO class_teachers (teacher_id, class_id, school_id)
-                            VALUES (%s, %s, %s)
-                        """, (found_id, int(class_id), school_id))
-                    else:
-                        failed_inserts.append({
-                            "teacher_id": found_id,
-                            "error": "لا يوجد عمود teacher_id أو teacher_user_id في الجدول"
-                        })
-                        continue
-
+                        cursor.execute("INSERT INTO class_teachers (teacher_id, class_id, school_id) VALUES (%s, %s, %s)", (found_id, int(class_id), school_id))
                     added_count += 1
-
-                except Exception as insert_err:
-                    failed_inserts.append({
-                        "teacher_id": found_id,
-                        "error": str(insert_err)
-                    })
+                except Exception:
                     continue
-
             connection.commit()
-
-            if failed_inserts and added_count == 0:
-                return jsonify({
-                    "status": "error",
-                    "message": "فشل إدخال المعلمين",
-                    "errors": failed_inserts,
-                    "columns_detected": {"teacher_id": has_teacher_id, "teacher_user_id": has_teacher_user_id}
-                }), 500
-
             if added_count == 0 and invalid_ids:
-                return jsonify({
-                    "status": "error",
-                    "message": f"لم يتم العثور على المستخدمين: {', '.join(invalid_ids)}"
-                }), 404
-
-            if added_count == 0 and not invalid_ids:
-                return jsonify({
-                    "status": "success",
-                    "message": "المعلمون مسجلون مسبقاً"
-                }), 200
-
+                return jsonify({"status": "error", "message": f"لم يتم العثور على: {', '.join(invalid_ids)}"}), 404
+            if added_count == 0:
+                return jsonify({"status": "success", "message": "المعلمون مسجلون مسبقاً"}), 200
             msg = f"تم تسجيل {added_count} معلم بنجاح"
             if invalid_ids:
                 msg += f" | لم يتم العثور على: {', '.join(invalid_ids)}"
             return jsonify({"status": "success", "message": msg}), 200
-
     except Exception as e:
         try:
             connection.rollback()
@@ -1359,22 +1173,13 @@ def get_connected_teachers():
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
-
-            cursor.execute("""
-                SELECT column_name FROM information_schema.columns 
-                WHERE table_name = 'class_teachers'
-            """)
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'class_teachers'")
             existing_columns = [row['column_name'] for row in cursor.fetchall()]
             has_teacher_id = 'teacher_id' in existing_columns
             has_teacher_user_id = 'teacher_user_id' in existing_columns
-
-            if has_teacher_user_id:
-                teacher_col = 'teacher_user_id'
-            elif has_teacher_id:
-                teacher_col = 'teacher_id'
-            else:
+            teacher_col = 'teacher_user_id' if has_teacher_user_id else ('teacher_id' if has_teacher_id else None)
+            if not teacher_col:
                 return jsonify({"status": "error", "teachers": [], "message": "no teacher column found"}), 500
-
             cursor.execute(f"""
                 SELECT 
                     ct.{teacher_col} as teacher_col,
@@ -1387,14 +1192,12 @@ def get_connected_teachers():
                 ORDER BY ct.id DESC
             """, (school_id, int(class_id)))
             rows = cursor.fetchall()
-            teachers = []
-            for r in rows:
-                teachers.append({
-                    "id": r['teacher_col'] or "",
-                    "name": r['full_name'] or "معلم",
-                    "device_id": r['device_id'] or "",
-                    "image_url": r['image_url'] or ""
-                })
+            teachers = [{
+                "id": r['teacher_col'] or "",
+                "name": r['full_name'] or "معلم",
+                "device_id": r['device_id'] or "",
+                "image_url": r['image_url'] or ""
+            } for r in rows]
             return jsonify({"status": "success", "teachers": teachers}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e), "teachers": []}), 500
@@ -1466,15 +1269,13 @@ def get_class_presence():
                 ORDER BY cp.last_seen DESC
             """, (school_id, int(class_id)))
             rows = cursor.fetchall()
-            students = []
-            for r in rows:
-                students.append({
-                    "device_id": r['device_id'],
-                    "user_id": r['user_id'] or "",
-                    "full_name": r['full_name'] or "طالب",
-                    "image_url": r['image_url'] or "",
-                    "last_seen": r['last_seen'].isoformat() if r['last_seen'] else ""
-                })
+            students = [{
+                "device_id": r['device_id'],
+                "user_id": r['user_id'] or "",
+                "full_name": r['full_name'] or "طالب",
+                "image_url": r['image_url'] or "",
+                "last_seen": r['last_seen'].isoformat() if r['last_seen'] else ""
+            } for r in rows]
             return jsonify({"status": "success", "students": students}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e), "students": []}), 500
@@ -1494,10 +1295,7 @@ def heartbeat_class():
         return jsonify({"status": "error"}), 500
     try:
         with connection.cursor() as cursor:
-            cursor.execute("""
-                UPDATE class_presence SET last_seen = CURRENT_TIMESTAMP
-                WHERE school_id = %s AND class_id = %s AND device_id = %s
-            """, (school_id, int(class_id), device_id))
+            cursor.execute("UPDATE class_presence SET last_seen = CURRENT_TIMESTAMP WHERE school_id = %s AND class_id = %s AND device_id = %s", (school_id, int(class_id), device_id))
             connection.commit()
             return jsonify({"status": "success"}), 200
     except Exception as e:
@@ -1518,10 +1316,7 @@ def leave_class():
         return jsonify({"status": "error"}), 500
     try:
         with connection.cursor() as cursor:
-            cursor.execute("""
-                DELETE FROM class_presence 
-                WHERE school_id = %s AND class_id = %s AND device_id = %s
-            """, (school_id, int(class_id), device_id))
+            cursor.execute("DELETE FROM class_presence WHERE school_id = %s AND class_id = %s AND device_id = %s", (school_id, int(class_id), device_id))
             connection.commit()
             return jsonify({"status": "success"}), 200
     except Exception as e:
@@ -1531,46 +1326,50 @@ def leave_class():
 
 
 # ============================================================
-# ✅ طلبات المايك
+# 🆕 طلبات الصلاحيات (مايك + فيديو) — موحّدة
 # ============================================================
-@app.route('/request_mic', methods=['POST'])
-def request_mic():
+@app.route('/request_permission', methods=['POST'])
+def request_permission():
     school_id = request.values.get('school_id')
     class_id = request.values.get('class_id')
     device_id = request.values.get('device_id')
     user_id = request.values.get('user_id', '')
+    request_type = request.values.get('request_type', 'mic')
     if not school_id or not class_id or not device_id:
         return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
+    if request_type not in ('mic', 'video'):
+        return jsonify({"status": "error", "message": "request_type غير صالح"}), 400
     connection = get_db_connection(school_id)
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
-            cursor.execute(
-                "SELECT full_name, image_url FROM student_profiles WHERE device_id = %s",
-                (device_id,)
-            )
+            cursor.execute("SELECT full_name, image_url FROM student_profiles WHERE device_id = %s", (device_id,))
             student = cursor.fetchone()
             full_name = student['full_name'] if student else "طالب"
             image_url = student['image_url'] if student else ""
             cursor.execute("""
                 SELECT id FROM mic_requests
-                WHERE student_device_id = %s AND class_id = %s AND status = 'pending'
-            """, (device_id, int(class_id)))
-            existing = cursor.fetchone()
-            if existing:
+                WHERE student_device_id = %s AND class_id = %s AND request_type = %s AND status = 'pending'
+            """, (device_id, int(class_id), request_type))
+            if cursor.fetchone():
                 return jsonify({"status": "success", "message": "لديك طلب قائم بالفعل"}), 200
             cursor.execute("""
-                INSERT INTO mic_requests (school_id, class_id, student_device_id, student_user_id, student_name, student_image, status)
-                VALUES (%s, %s, %s, %s, %s, %s, 'pending')
-            """, (school_id, int(class_id), device_id, user_id, full_name, image_url))
+                INSERT INTO mic_requests (school_id, class_id, student_device_id, student_user_id, student_name, student_image, request_type, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')
+            """, (school_id, int(class_id), device_id, user_id, full_name, image_url, request_type))
             connection.commit()
-            return jsonify({"status": "success", "message": "تم إرسال طلب المايك"}), 200
+            return jsonify({"status": "success", "message": "تم إرسال الطلب"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if connection: connection.close()
+
+
+@app.route('/request_mic', methods=['POST'])
+def request_mic():
+    return request_permission()
 
 
 @app.route('/get_mic_requests', methods=['POST'])
@@ -1586,21 +1385,54 @@ def get_mic_requests():
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
             cursor.execute("""
-                SELECT id, student_device_id, student_user_id, student_name, student_image, status, created_at
+                SELECT id, student_device_id, student_user_id, student_name, student_image, request_type, status, created_at
                 FROM mic_requests
                 WHERE school_id = %s AND class_id = %s AND status = 'pending'
                 ORDER BY created_at ASC
             """, (school_id, int(class_id)))
             rows = cursor.fetchall()
-            requests_list = []
-            for r in rows:
-                requests_list.append({
-                    "id": r['id'],
-                    "device_id": r['student_device_id'],
-                    "user_id": r['student_user_id'] or "",
-                    "name": r['student_name'] or "طالب",
-                    "image_url": r['student_image'] or "",
-                })
+            requests_list = [{
+                "id": r['id'],
+                "device_id": r['student_device_id'],
+                "user_id": r['student_user_id'] or "",
+                "name": r['student_name'] or "طالب",
+                "image_url": r['student_image'] or "",
+                "request_type": r.get('request_type', 'mic'),
+            } for r in rows]
+            return jsonify({"status": "success", "requests": requests_list}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e), "requests": []}), 500
+    finally:
+        if connection: connection.close()
+
+
+@app.route('/get_pending_permissions_for_teacher', methods=['POST'])
+def get_pending_permissions_for_teacher():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+    if not school_id or not class_id:
+        return jsonify({"status": "error", "requests": []}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "requests": []}), 500
+    try:
+        with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            cursor.execute("""
+                SELECT id, student_device_id, student_user_id, student_name, student_image, request_type, status, created_at
+                FROM mic_requests
+                WHERE school_id = %s AND class_id = %s AND status = 'pending'
+                ORDER BY created_at ASC
+            """, (school_id, int(class_id)))
+            rows = cursor.fetchall()
+            requests_list = [{
+                "id": r['id'],
+                "device_id": r['student_device_id'],
+                "user_id": r['student_user_id'] or "",
+                "name": r['student_name'] or "طالب",
+                "image_url": r['student_image'] or "",
+                "request_type": r.get('request_type', 'mic'),
+            } for r in rows]
             return jsonify({"status": "success", "requests": requests_list}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e), "requests": []}), 500
@@ -1620,10 +1452,94 @@ def respond_mic_request():
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            cursor.execute("SELECT * FROM mic_requests WHERE id = %s", (int(request_id),))
+            req = cursor.fetchone()
+            if not req:
+                return jsonify({"status": "error", "message": "الطلب غير موجود"}), 404
             new_status = 'approved' if action == 'approve' else 'rejected'
             cursor.execute("UPDATE mic_requests SET status = %s WHERE id = %s", (new_status, int(request_id)))
+            if action == 'approve':
+                req_type = req.get('request_type', 'mic')
+                student_uid = req['student_user_id']
+                if student_uid:
+                    col = 'can_mic' if req_type == 'mic' else 'can_video'
+                    cursor.execute(f"""
+                        INSERT INTO class_permissions (school_id, class_id, student_user_id, {col}, updated_at)
+                        VALUES (%s, %s, %s, 1, CURRENT_TIMESTAMP)
+                        ON CONFLICT (school_id, class_id, student_user_id) DO UPDATE SET
+                            {col} = 1,
+                            updated_at = CURRENT_TIMESTAMP
+                    """, (school_id, int(req['class_id']), student_uid))
             connection.commit()
             return jsonify({"status": "success", "message": "تمت العملية"}), 200
+    except Exception as e:
+        try:
+            connection.rollback()
+        except:
+            pass
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+
+@app.route('/get_my_permissions', methods=['POST'])
+def get_my_permissions():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+    user_id = request.values.get('user_id')
+    if not school_id or not class_id or not user_id:
+        return jsonify({"status": "error", "message": "بيانات ناقصة"}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            cursor.execute("""
+                SELECT can_mic, can_video FROM class_permissions
+                WHERE school_id = %s AND class_id = %s AND student_user_id = %s
+            """, (school_id, int(class_id), user_id))
+            row = cursor.fetchone()
+            if row:
+                return jsonify({
+                    "status": "success",
+                    "can_mic": bool(row['can_mic']),
+                    "can_video": bool(row['can_video'])
+                }), 200
+            return jsonify({"status": "success", "can_mic": False, "can_video": False}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+
+@app.route('/check_my_request_status', methods=['POST'])
+def check_my_request_status():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+    device_id = request.values.get('device_id')
+    if not school_id or not class_id or not device_id:
+        return jsonify({"status": "error", "message": "بيانات ناقصة"}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            cursor.execute("""
+                SELECT request_type, status FROM mic_requests
+                WHERE school_id = %s AND class_id = %s AND student_device_id = %s
+                  AND status IN ('pending', 'approved', 'rejected')
+                ORDER BY created_at DESC LIMIT 10
+            """, (school_id, int(class_id), device_id))
+            rows = cursor.fetchall()
+            result = {}
+            for r in rows:
+                rt = r.get('request_type', 'mic')
+                if rt not in result:
+                    result[rt] = r['status']
+            return jsonify({"status": "success", "requests": result}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
@@ -1680,9 +1596,6 @@ def update_leader_password():
         if connection: connection.close()
 
 
-# ============================================================
-# 🆕 kick_user (محسّن - يزيل من LiveKit + DB)
-# ============================================================
 @app.route('/kick_user', methods=['POST'])
 def kick_user():
     school_id = request.values.get('school_id')
@@ -1690,28 +1603,24 @@ def kick_user():
     user_id = request.values.get('user_id')
     if not school_id or not class_id or not user_id:
         return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
-
     connection = get_db_connection(school_id)
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
-
     try:
         with connection.cursor() as cursor:
-            # 1. حذف من قاعدة البيانات
             cursor.execute("DELETE FROM class_presence WHERE school_id = %s AND class_id = %s AND user_id = %s",
                           (school_id, int(class_id), user_id))
             try:
                 cursor.execute("DELETE FROM class_teachers WHERE school_id = %s AND class_id = %s AND teacher_user_id = %s",
                               (school_id, int(class_id), user_id))
             except Exception:
-                try:
-                    cursor.execute("DELETE FROM class_teachers WHERE school_id = %s AND class_id = %s AND teacher_id = %s",
-                                  (school_id, int(class_id), user_id))
-                except Exception:
-                    pass
+                pass
+            try:
+                cursor.execute("DELETE FROM class_permissions WHERE school_id = %s AND class_id = %s AND student_user_id = %s",
+                              (school_id, int(class_id), user_id))
+            except Exception:
+                pass
             connection.commit()
-
-        # 2. 🆕 إزالة من LiveKit Room (إذا موجود)
         livekit_removed = False
         try:
             client = get_livekit_room_service()
@@ -1721,22 +1630,13 @@ def kick_user():
                 livekit_removed = True
         except Exception as e:
             print(f"⚠️ LiveKit remove warning: {e}")
-
-        return jsonify({
-            "status": "success",
-            "message": "تم الطرد بنجاح",
-            "livekit_removed": livekit_removed
-        }), 200
-
+        return jsonify({"status": "success", "message": "تم الطرد بنجاح", "livekit_removed": livekit_removed}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if connection: connection.close()
 
 
-# ============================================================
-# ✅ الرئيسية
-# ============================================================
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({"message": "School & Classes API is running successfully!"}), 200
