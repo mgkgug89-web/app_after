@@ -26,11 +26,13 @@ LIVEKIT_API_KEY = "APIbmfvPM9vQA4s"
 LIVEKIT_API_SECRET = "8p7SAFQiWjhr5YN86h4fnuwILLcMAZ1fkgYn4ri4rvE"
 LIVEKIT_URL = "wss://distancelearning-mlptg6d9.livekit.cloud"
 
+
 def get_db_index(school_id):
     if not school_id or not str(school_id)[0].isdigit():
         return 0
     first_digit = int(str(school_id)[0])
-    return first_digit // 2 
+    return first_digit // 2
+
 
 def get_db_connection(school_id=None):
     try:
@@ -52,11 +54,11 @@ def get_db_connection(school_id=None):
         print(f"❌ Error connecting to DB_{db_index}: {e}")
         return None
 
+
 # ============================================================
 # ✅ إنشاء الجداول + إصلاح الأعمدة الناقصة تلقائياً
 # ============================================================
 def create_tables_if_not_exist(cursor):
-    # جدول المدارس
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS schools (
             id SERIAL PRIMARY KEY,
@@ -75,7 +77,6 @@ def create_tables_if_not_exist(cursor):
     cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS close_password VARCHAR(255) DEFAULT '1234';")
     cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS leader_password VARCHAR(255) DEFAULT '123456';")
 
-    # صور المدارس
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS school_images (
             school_id INT PRIMARY KEY REFERENCES schools(id) ON DELETE CASCADE,
@@ -84,7 +85,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # مفاتيح الإدارة
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS admin_keys (
             id SERIAL PRIMARY KEY,
@@ -94,7 +94,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # الفصول
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS classes (
             id SERIAL PRIMARY KEY,
@@ -106,7 +105,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # الزوار
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS visitors (
             id SERIAL PRIMARY KEY,
@@ -117,7 +115,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # ملفات الطلاب
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS student_profiles (
             id SERIAL PRIMARY KEY,
@@ -131,7 +128,7 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # 🆕 جدول المعلمين - نُنشئه بدون أي قيد NOT NULL على teacher_id
+    # جدول المعلمين - يدعم teacher_id و teacher_user_id
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS class_teachers (
             id SERIAL PRIMARY KEY,
@@ -141,20 +138,15 @@ def create_tables_if_not_exist(cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    
-    # محاولة إضافة الأعمدة إذا لم تكن موجودة (لن يؤثر إذا كانت موجودة)
     try:
         cursor.execute("ALTER TABLE class_teachers ADD COLUMN IF NOT EXISTS teacher_user_id VARCHAR(50);")
     except Exception:
         pass
-    
-    # 🆕 إزالة القيد NOT NULL من teacher_id إذا كان موجوداً (لكي لا يفشل الإدخال)
     try:
         cursor.execute("ALTER TABLE class_teachers ALTER COLUMN teacher_id DROP NOT NULL;")
     except Exception:
         pass
 
-    # الحضور في الفصول
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS class_presence (
             id SERIAL PRIMARY KEY,
@@ -167,7 +159,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # طلبات المايك
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mic_requests (
             id SERIAL PRIMARY KEY,
@@ -181,6 +172,7 @@ def create_tables_if_not_exist(cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
 
 def init_all_databases():
     for i in range(5):
@@ -199,11 +191,12 @@ def init_all_databases():
             finally:
                 conn.close()
 
+
 def refresh_cache():
     global cached_schools
     all_schools = []
     for i in range(5):
-        connection = get_db_connection(str(i * 2)) 
+        connection = get_db_connection(str(i * 2))
         if not connection:
             continue
         try:
@@ -228,11 +221,28 @@ def refresh_cache():
     all_schools.sort(key=lambda x: x['school_id'], reverse=True)
     cached_schools = all_schools
 
+
 init_all_databases()
 refresh_cache()
 
+
 # ============================================================
-# 🆕 توليد توكن LiveKit
+# 🆕 LiveKit Room Service (لإدارة الغرف والمشاركين)
+# ============================================================
+def get_livekit_room_service():
+    try:
+        return api.RoomServiceClient(
+            LIVEKIT_URL.replace("wss://", "https://"),
+            LIVEKIT_API_KEY,
+            LIVEKIT_API_SECRET,
+        )
+    except Exception as e:
+        print(f"❌ LiveKit Room Service Error: {e}")
+        return None
+
+
+# ============================================================
+# 🆕 توليد توكن LiveKit (محسّن لاستقرار الصوت)
 # ============================================================
 @app.route('/get_livekit_token', methods=['POST'])
 def get_livekit_token():
@@ -240,6 +250,7 @@ def get_livekit_token():
     class_id = request.values.get('class_id')
     user_id = request.values.get('user_id')
     user_name = request.values.get('user_name', 'User')
+    user_role = request.values.get('role', 'student')
 
     if not school_id or not class_id or not user_id:
         return jsonify({"status": "error", "message": "بيانات ناقصة"}), 400
@@ -247,14 +258,18 @@ def get_livekit_token():
     room_name = f"class_{school_id}_{class_id}"
 
     try:
+        # 🆕 توكن محسّن مع metadata
         token = api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET) \
             .with_identity(user_id) \
             .with_name(user_name) \
+            .with_metadata(f'{{"role":"{user_role}","school":"{school_id}","class":"{class_id}"}}') \
             .with_grants(api.VideoGrants(
                 room_join=True,
                 room=room_name,
                 can_publish=True,
                 can_subscribe=True,
+                can_publish_data=True,
+                can_publish_sources=["camera", "microphone", "screen_share"],
             )) \
             .with_ttl(timedelta(seconds=3600)) \
             .to_jwt()
@@ -269,30 +284,115 @@ def get_livekit_token():
         print(f"❌ LiveKit Token Error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
 # ============================================================
-# 🆕 Endpoint إصلاح كل الجداول
+# 🆕 جلب معلومات الغرفة (للتشخيص)
+# ============================================================
+@app.route('/get_room_info', methods=['POST', 'GET'])
+def get_room_info():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+
+    if not school_id or not class_id:
+        return jsonify({"status": "error", "message": "بيانات ناقصة"}), 400
+
+    room_name = f"class_{school_id}_{class_id}"
+
+    try:
+        client = get_livekit_room_service()
+        if not client:
+            return jsonify({"status": "error", "message": "LiveKit RoomService غير متاح"}), 500
+
+        try:
+            room = client.list_rooms()
+            participants = client.list_participants(room=room_name)
+            participants_list = []
+            for p in participants:
+                participants_list.append({
+                    "identity": p.identity,
+                    "name": p.name,
+                    "state": str(p.state),
+                    "joined_at": p.joined_at,
+                })
+
+            return jsonify({
+                "status": "success",
+                "room": room_name,
+                "participants": participants_list,
+                "count": len(participants_list),
+            }), 200
+        except Exception as e:
+            return jsonify({
+                "status": "success",
+                "room": room_name,
+                "participants": [],
+                "count": 0,
+                "note": f"الغرفة فارغة أو غير موجودة: {str(e)}"
+            }), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ============================================================
+# 🆕 إزالة مشارك من LiveKit Room (أقوى من kick_user)
+# ============================================================
+@app.route('/remove_participant', methods=['POST'])
+def remove_participant():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+    user_id = request.values.get('user_id')
+
+    if not school_id or not class_id or not user_id:
+        return jsonify({"status": "error", "message": "بيانات ناقصة"}), 400
+
+    room_name = f"class_{school_id}_{class_id}"
+
+    try:
+        client = get_livekit_room_service()
+        if not client:
+            return jsonify({"status": "error", "message": "LiveKit RoomService غير متاح"}), 500
+
+        try:
+            client.remove_participant(room=room_name, identity=user_id)
+            return jsonify({
+                "status": "success",
+                "message": f"تم إزالة {user_id} من الغرفة",
+            }), 200
+        except Exception as e:
+            return jsonify({
+                "status": "error",
+                "message": f"لم يتم العثور على المشارك: {str(e)}",
+            }), 404
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ============================================================
+# 🆕 إصلاح كل الجداول
 # ============================================================
 @app.route('/fix_all_tables', methods=['GET', 'POST'])
 def fix_all_tables():
     secret = request.values.get('secret')
     if secret != ADMIN_SECRET_PASSWORD:
         return jsonify({"status": "error", "message": "غير مصرح"}), 401
-    
+
     results = []
     all_success = True
-    
+
     for i in range(5):
         conn = get_db_connection(str(i * 2))
         if not conn:
             results.append({"db_index": i, "status": "skipped", "reason": "no connection"})
             all_success = False
             continue
-        
+
         db_result = {"db_index": i, "steps": {}}
-        
+
         try:
             cursor = conn.cursor()
-            
+
             try:
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS class_teachers (
@@ -308,7 +408,7 @@ def fix_all_tables():
             except Exception as e:
                 conn.rollback()
                 db_result["steps"]["create_table"] = f"error: {str(e)}"
-            
+
             try:
                 cursor.execute("ALTER TABLE class_teachers ADD COLUMN IF NOT EXISTS teacher_user_id VARCHAR(50);")
                 conn.commit()
@@ -316,8 +416,7 @@ def fix_all_tables():
             except Exception as e:
                 conn.rollback()
                 db_result["steps"]["add_column"] = f"error: {str(e)}"
-            
-            # 🆕 إزالة NOT NULL من teacher_id (العمود القديم)
+
             try:
                 cursor.execute("ALTER TABLE class_teachers ALTER COLUMN teacher_id DROP NOT NULL;")
                 conn.commit()
@@ -325,7 +424,7 @@ def fix_all_tables():
             except Exception as e:
                 conn.rollback()
                 db_result["steps"]["drop_not_null_teacher_id"] = f"error: {str(e)}"
-            
+
             try:
                 cursor.execute("""
                     DO $$
@@ -347,7 +446,7 @@ def fix_all_tables():
             except Exception as e:
                 conn.rollback()
                 db_result["steps"]["add_constraint"] = f"error: {str(e)}"
-            
+
             try:
                 cursor.execute("""
                     SELECT column_name FROM information_schema.columns 
@@ -360,11 +459,11 @@ def fix_all_tables():
             except Exception as e:
                 db_result["verification_error"] = str(e)
                 all_success = False
-            
+
             cursor.close()
             db_result["status"] = "success"
             results.append(db_result)
-            
+
         except Exception as e:
             try:
                 conn.rollback()
@@ -374,15 +473,16 @@ def fix_all_tables():
             all_success = False
         finally:
             if conn: conn.close()
-    
+
     return jsonify({
         "status": "success" if all_success else "partial",
         "message": "✅ تم إصلاح جميع الجداول بنجاح!" if all_success else "⚠️ تم الإصلاح جزئياً - راجع النتائج",
         "results": results
     }), 200
 
+
 # ============================================================
-# 🆕 Endpoint لفحص وجود user_id
+# 🆕 فحص وجود user_id
 # ============================================================
 @app.route('/check_user_id', methods=['POST', 'GET'])
 def check_user_id():
@@ -483,15 +583,16 @@ def check_user_id():
         "results": results
     }), 200
 
+
 # ============================================================
-# 🆕 Endpoint مؤقت لترحيل البيانات القديمة
+# 🆕 ترحيل البيانات القديمة
 # ============================================================
 @app.route('/migrate_user_ids', methods=['POST'])
 def migrate_user_ids():
     secret = request.values.get('secret')
     if secret != ADMIN_SECRET_PASSWORD:
         return jsonify({"status": "error", "message": "غير مصرح"}), 401
-    
+
     results = []
     for i in range(5):
         conn = get_db_connection(str(i * 2))
@@ -550,8 +651,9 @@ def migrate_user_ids():
             results.append({"db_index": i, "error": str(e)})
         finally:
             conn.close()
-    
+
     return jsonify({"status": "success", "results": results}), 200
+
 
 @app.route('/check_device_id', methods=['POST', 'GET'])
 def check_device_id():
@@ -589,10 +691,10 @@ def check_device_id():
     finally:
         if connection: connection.close()
 
-# ============================================================
-# باقي الـ Endpoints
-# ============================================================
 
+# ============================================================
+# ✅ حفظ/جلب الملف الشخصي
+# ============================================================
 @app.route('/save_user_profile', methods=['POST'])
 def save_user_profile():
     device_id = request.values.get('device_id')
@@ -644,6 +746,7 @@ def save_user_profile():
     finally:
         if connection: connection.close()
 
+
 @app.route('/get_user_profile', methods=['POST'])
 def get_user_profile():
     device_id = request.values.get('device_id')
@@ -665,6 +768,10 @@ def get_user_profile():
     finally:
         if connection: connection.close()
 
+
+# ============================================================
+# ✅ المدارس
+# ============================================================
 @app.route('/verify', methods=['POST'])
 def verify_school():
     school_id = request.values.get('school_id')
@@ -686,6 +793,7 @@ def verify_school():
     finally:
         if connection: connection.close()
 
+
 @app.route('/verify_admin', methods=['POST'])
 def verify_admin():
     password = request.values.get('password')
@@ -693,6 +801,7 @@ def verify_admin():
         return jsonify({"status": "success", "message": "تم التحقق"}), 200
     else:
         return jsonify({"status": "error", "message": "كلمة السر غير صحيحة"}), 401
+
 
 @app.route('/verify_school_admin', methods=['POST'])
 def verify_school_admin():
@@ -715,6 +824,7 @@ def verify_school_admin():
     finally:
         if connection: connection.close()
 
+
 @app.route('/update_school_admin_password', methods=['POST'])
 def update_school_admin_password():
     school_id = request.values.get('school_id')
@@ -734,6 +844,7 @@ def update_school_admin_password():
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if connection: connection.close()
+
 
 @app.route('/set_school_status', methods=['POST'])
 def set_school_status():
@@ -759,6 +870,7 @@ def set_school_status():
     finally:
         if connection: connection.close()
 
+
 @app.route('/verify_school_close_pass', methods=['POST'])
 def verify_school_close_pass():
     school_id = request.values.get('school_id')
@@ -777,6 +889,7 @@ def verify_school_close_pass():
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if connection: connection.close()
+
 
 @app.route('/get_school_details', methods=['POST'])
 def get_school_details():
@@ -798,6 +911,10 @@ def get_school_details():
     finally:
         if connection: connection.close()
 
+
+# ============================================================
+# ✅ الزوار
+# ============================================================
 @app.route('/request_visit', methods=['POST'])
 def request_visit():
     school_id = request.values.get('school_id')
@@ -818,6 +935,7 @@ def request_visit():
     finally:
         if connection: connection.close()
 
+
 @app.route('/get_visitors', methods=['POST', 'GET'])
 def get_visitors():
     school_id = request.values.get('school_id')
@@ -837,6 +955,7 @@ def get_visitors():
     finally:
         if connection: connection.close()
 
+
 @app.route('/approve_visitor', methods=['POST'])
 def approve_visitor():
     school_id = request.values.get('school_id')
@@ -854,6 +973,10 @@ def approve_visitor():
     finally:
         if connection: connection.close()
 
+
+# ============================================================
+# ✅ المفاتيح والإنشاء
+# ============================================================
 @app.route('/generate_key', methods=['GET'])
 def generate_key():
     alphabet = string.ascii_uppercase + string.digits
@@ -877,6 +1000,7 @@ def generate_key():
     finally:
         if connection: connection.close()
 
+
 @app.route('/create_school', methods=['POST'])
 def create_school():
     school_name = request.values.get('school_name')
@@ -889,7 +1013,7 @@ def create_school():
     for _ in range(20):
         temp_id = ''.join(secrets.choice(string.digits) for _ in range(6))
         conn = get_db_connection(temp_id)
-        if not conn: 
+        if not conn:
             continue
         try:
             with conn.cursor() as cursor:
@@ -938,11 +1062,16 @@ def create_school():
     finally:
         if connection: connection.close()
 
+
 @app.route('/get_schools', methods=['GET'])
 def get_schools():
     refresh_cache()
     return jsonify({"status": "success", "schools": cached_schools}), 200
 
+
+# ============================================================
+# ✅ الفصول
+# ============================================================
 @app.route('/get_classes', methods=['POST'])
 def get_classes():
     school_id = request.values.get('school_id')
@@ -961,6 +1090,7 @@ def get_classes():
         return jsonify({"status": "error", "classes": []}), 500
     finally:
         if connection: connection.close()
+
 
 @app.route('/create_class', methods=['POST'])
 def create_class():
@@ -998,6 +1128,7 @@ def create_class():
     finally:
         if connection: connection.close()
 
+
 @app.route('/delete_class', methods=['POST'])
 def delete_class():
     school_id = request.values.get('school_id')
@@ -1017,6 +1148,7 @@ def delete_class():
         return jsonify({"status": "error", "message": "خطأ في الحذف"}), 500
     finally:
         if connection: connection.close()
+
 
 @app.route('/update_class_password', methods=['POST'])
 def update_class_password():
@@ -1038,8 +1170,9 @@ def update_class_password():
     finally:
         if connection: connection.close()
 
+
 # ============================================================
-# 🆕 register_teachers - النسخة النهائية (تدعم teacher_id و teacher_user_id)
+# 🆕 register_teachers - النسخة النهائية
 # ============================================================
 @app.route('/register_teachers', methods=['POST'])
 def register_teachers():
@@ -1048,20 +1181,20 @@ def register_teachers():
     teacher_ids = request.values.get('teacher_ids', '')
     if not school_id or not class_id or not teacher_ids:
         return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
-    
+
     connection = get_db_connection(school_id)
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
-    
+
     try:
         ids_list = [tid.strip() for tid in teacher_ids.split(",") if tid.strip()]
         if not ids_list:
             return jsonify({"status": "error", "message": "لا توجد IDs صالحة"}), 400
-        
+
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
-            
-            # 🆕 اكتشاف بنية الجدول
+
+            # اكتشاف بنية الجدول
             cursor.execute("""
                 SELECT column_name FROM information_schema.columns 
                 WHERE table_name = 'class_teachers'
@@ -1069,11 +1202,11 @@ def register_teachers():
             existing_columns = [row['column_name'] for row in cursor.fetchall()]
             has_teacher_id = 'teacher_id' in existing_columns
             has_teacher_user_id = 'teacher_user_id' in existing_columns
-            
+
             added_count = 0
             invalid_ids = []
             failed_inserts = []
-            
+
             for raw_tid in ids_list:
                 tid = raw_tid
                 found_id = None
@@ -1128,7 +1261,6 @@ def register_teachers():
                     invalid_ids.append(tid)
                     continue
 
-                # 🆕 التحقق من وجوده مسبقاً (بأي عمود متاح)
                 try:
                     if has_teacher_user_id:
                         cursor.execute(
@@ -1146,22 +1278,18 @@ def register_teachers():
                         existing = cursor.fetchone()
                         if existing:
                             continue
-                    
-                    # 🆕 إدخال ديناميكي حسب الأعمدة الموجودة
+
                     if has_teacher_id and has_teacher_user_id:
-                        # كلا العمودين موجودان - نملأ كليهما
                         cursor.execute("""
                             INSERT INTO class_teachers (teacher_id, teacher_user_id, class_id, school_id)
                             VALUES (%s, %s, %s, %s)
                         """, (found_id, found_id, int(class_id), school_id))
                     elif has_teacher_user_id:
-                        # فقط teacher_user_id
                         cursor.execute("""
                             INSERT INTO class_teachers (teacher_user_id, class_id, school_id)
                             VALUES (%s, %s, %s)
                         """, (found_id, int(class_id), school_id))
                     elif has_teacher_id:
-                        # فقط teacher_id
                         cursor.execute("""
                             INSERT INTO class_teachers (teacher_id, class_id, school_id)
                             VALUES (%s, %s, %s)
@@ -1172,9 +1300,9 @@ def register_teachers():
                             "error": "لا يوجد عمود teacher_id أو teacher_user_id في الجدول"
                         })
                         continue
-                    
+
                     added_count += 1
-                    
+
                 except Exception as insert_err:
                     failed_inserts.append({
                         "teacher_id": found_id,
@@ -1183,7 +1311,7 @@ def register_teachers():
                     continue
 
             connection.commit()
-            
+
             if failed_inserts and added_count == 0:
                 return jsonify({
                     "status": "error",
@@ -1191,24 +1319,24 @@ def register_teachers():
                     "errors": failed_inserts,
                     "columns_detected": {"teacher_id": has_teacher_id, "teacher_user_id": has_teacher_user_id}
                 }), 500
-            
+
             if added_count == 0 and invalid_ids:
                 return jsonify({
                     "status": "error",
                     "message": f"لم يتم العثور على المستخدمين: {', '.join(invalid_ids)}"
                 }), 404
-            
+
             if added_count == 0 and not invalid_ids:
                 return jsonify({
                     "status": "success",
                     "message": "المعلمون مسجلون مسبقاً"
                 }), 200
-            
+
             msg = f"تم تسجيل {added_count} معلم بنجاح"
             if invalid_ids:
                 msg += f" | لم يتم العثور على: {', '.join(invalid_ids)}"
             return jsonify({"status": "success", "message": msg}), 200
-            
+
     except Exception as e:
         try:
             connection.rollback()
@@ -1217,6 +1345,7 @@ def register_teachers():
         return jsonify({"status": "error", "message": f"خطأ: {str(e)}"}), 500
     finally:
         if connection: connection.close()
+
 
 @app.route('/get_connected_teachers', methods=['POST'])
 def get_connected_teachers():
@@ -1230,8 +1359,7 @@ def get_connected_teachers():
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
-            
-            # 🆕 اكتشاف بنية الجدول
+
             cursor.execute("""
                 SELECT column_name FROM information_schema.columns 
                 WHERE table_name = 'class_teachers'
@@ -1239,15 +1367,14 @@ def get_connected_teachers():
             existing_columns = [row['column_name'] for row in cursor.fetchall()]
             has_teacher_id = 'teacher_id' in existing_columns
             has_teacher_user_id = 'teacher_user_id' in existing_columns
-            
-            # 🆕 اختيار العمود الصحيح
+
             if has_teacher_user_id:
                 teacher_col = 'teacher_user_id'
             elif has_teacher_id:
                 teacher_col = 'teacher_id'
             else:
                 return jsonify({"status": "error", "teachers": [], "message": "no teacher column found"}), 500
-            
+
             cursor.execute(f"""
                 SELECT 
                     ct.{teacher_col} as teacher_col,
@@ -1274,6 +1401,10 @@ def get_connected_teachers():
     finally:
         if connection: connection.close()
 
+
+# ============================================================
+# ✅ الحضور
+# ============================================================
 @app.route('/join_class', methods=['POST'])
 def join_class():
     school_id = request.values.get('school_id')
@@ -1306,6 +1437,7 @@ def join_class():
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if connection: connection.close()
+
 
 @app.route('/get_class_presence', methods=['POST'])
 def get_class_presence():
@@ -1349,6 +1481,7 @@ def get_class_presence():
     finally:
         if connection: connection.close()
 
+
 @app.route('/heartbeat_class', methods=['POST'])
 def heartbeat_class():
     school_id = request.values.get('school_id')
@@ -1371,6 +1504,7 @@ def heartbeat_class():
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if connection: connection.close()
+
 
 @app.route('/leave_class', methods=['POST'])
 def leave_class():
@@ -1395,6 +1529,10 @@ def leave_class():
     finally:
         if connection: connection.close()
 
+
+# ============================================================
+# ✅ طلبات المايك
+# ============================================================
 @app.route('/request_mic', methods=['POST'])
 def request_mic():
     school_id = request.values.get('school_id')
@@ -1434,6 +1572,7 @@ def request_mic():
     finally:
         if connection: connection.close()
 
+
 @app.route('/get_mic_requests', methods=['POST'])
 def get_mic_requests():
     school_id = request.values.get('school_id')
@@ -1468,6 +1607,7 @@ def get_mic_requests():
     finally:
         if connection: connection.close()
 
+
 @app.route('/respond_mic_request', methods=['POST'])
 def respond_mic_request():
     school_id = request.values.get('school_id')
@@ -1489,6 +1629,10 @@ def respond_mic_request():
     finally:
         if connection: connection.close()
 
+
+# ============================================================
+# ✅ كلمات السر الرئيسية
+# ============================================================
 @app.route('/verify_leader_password', methods=['POST'])
 def verify_leader_password():
     school_id = request.values.get('school_id')
@@ -1509,6 +1653,7 @@ def verify_leader_password():
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if connection: connection.close()
+
 
 @app.route('/update_leader_password', methods=['POST'])
 def update_leader_password():
@@ -1534,6 +1679,10 @@ def update_leader_password():
     finally:
         if connection: connection.close()
 
+
+# ============================================================
+# 🆕 kick_user (محسّن - يزيل من LiveKit + DB)
+# ============================================================
 @app.route('/kick_user', methods=['POST'])
 def kick_user():
     school_id = request.values.get('school_id')
@@ -1541,32 +1690,57 @@ def kick_user():
     user_id = request.values.get('user_id')
     if not school_id or not class_id or not user_id:
         return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
+
     connection = get_db_connection(school_id)
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+
     try:
         with connection.cursor() as cursor:
-            cursor.execute("DELETE FROM class_presence WHERE school_id = %s AND class_id = %s AND user_id = %s", 
+            # 1. حذف من قاعدة البيانات
+            cursor.execute("DELETE FROM class_presence WHERE school_id = %s AND class_id = %s AND user_id = %s",
                           (school_id, int(class_id), user_id))
             try:
-                cursor.execute("DELETE FROM class_teachers WHERE school_id = %s AND class_id = %s AND teacher_user_id = %s", 
+                cursor.execute("DELETE FROM class_teachers WHERE school_id = %s AND class_id = %s AND teacher_user_id = %s",
                               (school_id, int(class_id), user_id))
             except Exception:
                 try:
-                    cursor.execute("DELETE FROM class_teachers WHERE school_id = %s AND class_id = %s AND teacher_id = %s", 
+                    cursor.execute("DELETE FROM class_teachers WHERE school_id = %s AND class_id = %s AND teacher_id = %s",
                                   (school_id, int(class_id), user_id))
                 except Exception:
                     pass
             connection.commit()
-            return jsonify({"status": "success", "message": "تم الطرد بنجاح"}), 200
+
+        # 2. 🆕 إزالة من LiveKit Room (إذا موجود)
+        livekit_removed = False
+        try:
+            client = get_livekit_room_service()
+            if client:
+                room_name = f"class_{school_id}_{class_id}"
+                client.remove_participant(room=room_name, identity=user_id)
+                livekit_removed = True
+        except Exception as e:
+            print(f"⚠️ LiveKit remove warning: {e}")
+
+        return jsonify({
+            "status": "success",
+            "message": "تم الطرد بنجاح",
+            "livekit_removed": livekit_removed
+        }), 200
+
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if connection: connection.close()
 
+
+# ============================================================
+# ✅ الرئيسية
+# ============================================================
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({"message": "School & Classes API is running successfully!"}), 200
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
