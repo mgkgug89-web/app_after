@@ -702,8 +702,12 @@ def register_teachers():
             added_count = 0
             invalid_ids = []
             for tid in ids_list:
+                # 🆕 التحقق من وجود المستخدم في أي من الجدولين
                 cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s", (tid,))
                 exists = cursor.fetchone()
+                if not exists:
+                    cursor.execute("SELECT user_id FROM class_presence WHERE user_id = %s LIMIT 1", (tid,))
+                    exists = cursor.fetchone()
                 if not exists:
                     invalid_ids.append(tid)
                     continue
