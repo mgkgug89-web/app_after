@@ -1,66 +1,89 @@
 import os
 import secrets
 import string
-import time
-import hmac
-import hashlib
-import struct
 import psycopg2
 import requests
 import base64
-import io
 from psycopg2.extras import RealDictCursor
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
+
+# استيراد مكتبة LiveKit الرسمية لتوليد الـ Tokens
+from livekit.api import AccessToken, VideoGrant
 
 load_dotenv()
 app = Flask(__name__)
 CORS(app)
 app.json.ensure_ascii = False
 
-ADMIN_SECRET_PASSWORD = "2573486195715653N"
+# كلمة سر الإدارة تعتمد حصرياً على متغيرات البيئة لأمان تام
+ADMIN_SECRET_PASSWORD = os.environ.get("ADMIN_SECRET_PASSWORD")
 
-# بيانات أهورا (Agora Credentials) الخاصة بك
-AGORA_APP_ID = "7188af64a5264135a9c2aff47f247199"
-# احرص على إضافة AGORA_APP_CERTIFICATE في متغيرات البيئة (.env) أو ضعه هنا مباشرة
-AGORA_APP_CERTIFICATE = os.environ.get("AGORA_APP_CERTIFICATE", "")
+# بيانات LiveKit الخاصة بك
+LIVEKIT_URL = "wss://distancelearning-mlptg6d9.livekit.cloud"
+LIVEKIT_API_KEY = "APIma7Rx2W8iw7r"
+LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
 
 cached_schools = []
 
-# --- دوال توليد Agora Rtc Token لضمان الاتصال الحقيقي ---
-class AccessToken:
-    ROLE_ATTENDEE = 1
-    ROLE_PUBLISHER = 2
-    ROLE_SUBSCRIBER = 3
-    ROLE_ADMIN = 4
+# --- مسار توليد LiveKit Access Token للفصول الدراسية (بتحقق أمني صارم) ---
+@app.route('/get_livekit_token', methods=['POST'])
+def get_livekit_token():
+    school_id = request.values.get('school_id')
+    room_name = request.values.get('room_name')  # اسم الفصل الفريد
+    participant_name = request.values.get('participant_name') # اسم الطالب الحقيقي
+    is_teacher = request.values.get('is_teacher', 'false').lower() == 'true'
+    
+    # 1. التحقق من المدخلات الأساسية
+    if not school_id or not room_name or not participant_name:
+        return jsonify({"status": "error", "message": "بيانات غير مكتملة (school_id, room_name, participant_name مطلوبة)"}), 400
 
-    def __init__(self, app_id, app_certificate, channel_name, uid):
-        self.app_id = app_id
-        self.app_certificate = app_certificate
-        self.channel_name = channel_name
-        self.uid = str(uid) if uid else ""
-        self.messages = {}
+    if not LIVEKIT_API_SECRET:
+        return jsonify({"status": "error", "message": "LiveKit API Secret غير متوفر على السيرفر"}), 500
 
-    def add_privilege(self, privilege, expire_timestamp):
-        self.messages[privilege] = expire_timestamp
+    # 2. التحقق الأمني الحقيقي من وجود المدرسة في قاعدة البيانات
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "فشل الاتصال بقاعدة بيانات المدرسة"}), 500
+    
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT id, school_name FROM schools WHERE school_id = %s", (school_id,))
+            school = cursor.fetchone()
+            if not school:
+                return jsonify({"status": "error", "message": "هذه المدرسة غير مسجلة في النظام"}), 404
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"خطأ في التحقق من المدرسة: {str(e)}"}), 500
+    finally:
+        connection.close()
 
-    def pack(self):
-        pack_chars = struct.pack('<I', int(time.time()) + 86400) # صالح لمدة 24 ساعة
-        # دمج مبسط وآمن لتوليد التوكن الخاص بأهورا
-        signature = hmac.new(
-            self.app_certificate.encode('utf-8'),
-            (self.app_id + self.channel_name + self.uid).encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-        return f"006{self.app_id}{signature}"
-
-def generate_agora_token(channel_name, uid):
-    if not AGORA_APP_CERTIFICATE:
-        # إذا لم يتم تعيين الشهادة بعد، نرجع توكن افتراضي أو نعتمد على الـ App ID
-        return f"demo_token_{AGORA_APP_ID}_{channel_name}"
-    token_builder = AccessToken(AGORA_APP_ID, AGORA_APP_CERTIFICATE, channel_name, uid)
-    return token_builder.pack()
+    try:
+        # 3. تحديد الصلاحيات حسب دور المستخدم (معلم أو طالب)
+        # المعلم يحمل صلاحيات كاملة للنشر (Publish)، الطالب العادي يمكنه الاستماع والمشاركة حسب الحاجة
+        can_pub = True if is_teacher else True 
+        
+        token = AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET) \
+            .with_identity(participant_name) \
+            .with_name(participant_name) \
+            .with_grants(VideoGrant(
+                room_join=True,
+                room=room_name,
+                can_publish=can_pub,
+                can_subscribe=True
+            ))
+        
+        jwt_token = token.to_jwt()
+        
+        return jsonify({
+            "status": "success",
+            "url": LIVEKIT_URL,
+            "room_name": room_name,
+            "token": jwt_token,
+            "participant_name": participant_name
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # --- قواعد البيانات وسيرفر البايثون ---
 def get_db_index(school_id):
@@ -202,24 +225,6 @@ def refresh_cache():
 init_all_databases()
 refresh_cache()
 
-# --- مسار توليد Agora Token للفصول الدراسية ---
-@app.route('/get_agora_token', methods=['POST'])
-def get_agora_token():
-    channel_name = request.values.get('channel_name', 'default_class')
-    uid = request.values.get('uid', '0')
-    
-    try:
-        token = generate_agora_token(channel_name, uid)
-        return jsonify({
-            "status": "success",
-            "app_id": AGORA_APP_ID,
-            "channel_name": channel_name,
-            "token": token,
-            "uid": uid
-        }), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
 @app.route('/save_user_profile', methods=['POST'])
 def save_user_profile():
     device_id = request.values.get('device_id')
@@ -326,7 +331,7 @@ def verify_school():
 @app.route('/verify_admin', methods=['POST'])
 def verify_admin():
     password = request.values.get('password')
-    if password == ADMIN_SECRET_PASSWORD:
+    if ADMIN_SECRET_PASSWORD and password == ADMIN_SECRET_PASSWORD:
         return jsonify({"status": "success", "message": "تم التحقق"}), 200
     else:
         return jsonify({"status": "error", "message": "كلمة السر غير صحيحة"}), 401
@@ -470,7 +475,11 @@ def get_visitors():
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
-            cursor.execute("SELECT id, visitor_device_id, status FROM visitors WHERE school_id = %s AND status = 'pending' ORDER BY id DESC", (school_id,))
+            cursor.execute(
+                "SELECT id, visitor_device_id, status FROM visitors "
+                "WHERE school_id = %s AND status = 'pending' ORDER BY id DESC",
+                (school_id,)
+            )
             visitors = cursor.fetchall()
             return jsonify({"status": "success", "visitors": visitors}), 200
     except Exception:
@@ -698,7 +707,7 @@ def update_class_password():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"message": "School & Classes API with Agora Token Generator is running successfully!"}), 200
+    return jsonify({"message": "Secure School & Classes API with LiveKit Integration is running successfully!"}), 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
