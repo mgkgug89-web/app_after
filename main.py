@@ -20,9 +20,9 @@ app.json.ensure_ascii = False
 # كلمة سر الإدارة تعتمد حصرياً على متغيرات البيئة لأمان تام
 ADMIN_SECRET_PASSWORD = os.environ.get("ADMIN_SECRET_PASSWORD")
 
-# بيانات LiveKit الخاصة بك
-LIVEKIT_URL = "wss://distancelearning-mlptg6d9.livekit.cloud"
-LIVEKIT_API_KEY = "APIma7Rx2W8iw7r"
+# بيانات LiveKit الحقيقية الخاصة بك
+LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "wss://distancelearning-mlptg6d9.livekit.cloud")
+LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "APIhkgDG7rG9dVa")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
 
 cached_schools = []
@@ -60,7 +60,6 @@ def get_livekit_token():
 
     try:
         # 3. تحديد الصلاحيات حسب دور المستخدم (معلم أو طالب)
-        # المعلم يحمل صلاحيات كاملة للنشر (Publish)، الطالب العادي يمكنه الاستماع والمشاركة حسب الحاجة
         can_pub = True if is_teacher else True 
         
         token = AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET) \
