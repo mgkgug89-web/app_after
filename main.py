@@ -131,35 +131,23 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # 🆕 جدول المعلمين مع إصلاح تلقائي للأعمدة الناقصة
+    # 🆕 جدول المعلمين - نُنشئه بالعمود الصحيح من البداية
+    # إذا كان موجوداً بدون العمود، سنضيفه لاحقاً في fix_all_tables
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS class_teachers (
             id SERIAL PRIMARY KEY,
+            teacher_user_id VARCHAR(50),
             class_id INT NOT NULL,
             school_id VARCHAR(6) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # إضافة العمود إن لم يكن موجوداً
-    cursor.execute("ALTER TABLE class_teachers ADD COLUMN IF NOT EXISTS teacher_user_id VARCHAR(50);")
-    # إضافة القيد الفريد إن لم يكن موجوداً
-    cursor.execute("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint 
-                WHERE conname = 'class_teachers_teacher_user_id_class_id_key'
-            ) THEN
-                BEGIN
-                    ALTER TABLE class_teachers 
-                    ADD CONSTRAINT class_teachers_teacher_user_id_class_id_key 
-                    UNIQUE (teacher_user_id, class_id);
-                EXCEPTION WHEN OTHERS THEN
-                    NULL;
-                END;
-            END IF;
-        END $$;
-    """)
+    
+    # 🆕 محاولة إضافة العمود إذا لم يكن موجوداً (ستفشل بصمت إذا كان موجوداً)
+    try:
+        cursor.execute("ALTER TABLE class_teachers ADD COLUMN IF NOT EXISTS teacher_user_id VARCHAR(50);")
+    except Exception:
+        pass
 
     # الحضور في الفصول
     cursor.execute("""
@@ -199,6 +187,10 @@ def init_all_databases():
                     conn.commit()
             except Exception as e:
                 print(f"❌ Init error DB_{i}: {e}")
+                try:
+                    conn.rollback()
+                except:
+                    pass
             finally:
                 conn.close()
 
@@ -220,8 +212,12 @@ def refresh_cache():
                     ORDER BY s.id DESC
                 """)
                 all_schools.extend(cursor.fetchall())
+                connection.commit()
         except Exception:
-            pass
+            try:
+                connection.rollback()
+            except:
+                pass
         finally:
             if connection: connection.close()
     all_schools.sort(key=lambda x: x['school_id'], reverse=True)
@@ -269,51 +265,116 @@ def get_livekit_token():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ============================================================
-# 🆕 Endpoint إصلاح كل الجداول في كل قواعد البيانات
-# ⚠️ احذفه بعد الاستخدام مرة واحدة
+# 🆕 Endpoint إصلاح كل الجداول - نسخة محسّنة
+# يعمل عبر: /fix_all_tables?secret=XXX (GET) أو POST
 # ============================================================
-@app.route('/fix_all_tables', methods=['POST'])
+@app.route('/fix_all_tables', methods=['GET', 'POST'])
 def fix_all_tables():
     """
     إصلاح كل الجداول في قواعد البيانات الخمس
-    الاستخدام: curl -X POST "https://your-server.com/fix_all_tables" -d "secret=2573486195715653N"
+    يعمل عبر المتصفح: /fix_all_tables?secret=2573486195715653N
+    أو عبر curl: -X POST -d "secret=2573486195715653N"
     """
     secret = request.values.get('secret')
     if secret != ADMIN_SECRET_PASSWORD:
         return jsonify({"status": "error", "message": "غير مصرح"}), 401
     
     results = []
+    all_success = True
+    
     for i in range(5):
         conn = get_db_connection(str(i * 2))
         if not conn:
             results.append({"db_index": i, "status": "skipped", "reason": "no connection"})
+            all_success = False
             continue
+        
+        db_result = {"db_index": i, "steps": {}}
+        
         try:
-            with conn.cursor() as cursor:
-                # تنفيذ create_tables_if_not_exist التي تحتوي الآن على ALTER TABLE
-                create_tables_if_not_exist(cursor)
+            # ⚠️ كل عملية في transaction منفصل لضمان التنفيذ حتى لو فشل جزء
+            cursor = conn.cursor()
+            
+            # 1. التأكد من وجود الجدول
+            try:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS class_teachers (
+                        id SERIAL PRIMARY KEY,
+                        teacher_user_id VARCHAR(50),
+                        class_id INT NOT NULL,
+                        school_id VARCHAR(6) NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
                 conn.commit()
-                
-                # التحقق من وجود العمود
+                db_result["steps"]["create_table"] = "success"
+            except Exception as e:
+                conn.rollback()
+                db_result["steps"]["create_table"] = f"error: {str(e)}"
+            
+            # 2. إضافة العمود إذا لم يكن موجوداً
+            try:
+                cursor.execute("ALTER TABLE class_teachers ADD COLUMN IF NOT EXISTS teacher_user_id VARCHAR(50);")
+                conn.commit()
+                db_result["steps"]["add_column"] = "success"
+            except Exception as e:
+                conn.rollback()
+                db_result["steps"]["add_column"] = f"error: {str(e)}"
+            
+            # 3. إضافة القيد الفريد (اختياري، لن يؤثر إذا فشل)
+            try:
+                cursor.execute("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint 
+                            WHERE conname = 'class_teachers_unique_idx'
+                        ) THEN
+                            ALTER TABLE class_teachers 
+                            ADD CONSTRAINT class_teachers_unique_idx 
+                            UNIQUE (teacher_user_id, class_id);
+                        END IF;
+                    EXCEPTION WHEN OTHERS THEN
+                        NULL;
+                    END $$;
+                """)
+                conn.commit()
+                db_result["steps"]["add_constraint"] = "success"
+            except Exception as e:
+                conn.rollback()
+                db_result["steps"]["add_constraint"] = f"error: {str(e)}"
+            
+            # 4. التحقق من نجاح الإصلاح
+            try:
                 cursor.execute("""
                     SELECT column_name FROM information_schema.columns 
                     WHERE table_name = 'class_teachers' AND column_name = 'teacher_user_id'
                 """)
                 has_col = cursor.fetchone() is not None
-                
-                results.append({
-                    "db_index": i,
-                    "status": "success",
-                    "teacher_user_id_exists": has_col
-                })
+                db_result["teacher_user_id_exists"] = has_col
+                if not has_col:
+                    all_success = False
+            except Exception as e:
+                db_result["verification_error"] = str(e)
+                all_success = False
+            
+            cursor.close()
+            db_result["status"] = "success"
+            results.append(db_result)
+            
         except Exception as e:
+            try:
+                conn.rollback()
+            except:
+                pass
             results.append({"db_index": i, "status": "error", "error": str(e)})
+            all_success = False
         finally:
-            conn.close()
+            if conn: conn.close()
     
     return jsonify({
-        "status": "success",
-        "message": "تم إصلاح جميع الجداول",
+        "status": "success" if all_success else "partial",
+        "message": "✅ تم إصلاح جميع الجداول بنجاح!" if all_success else "⚠️ تم الإصلاح جزئياً - راجع النتائج",
         "results": results
     }), 200
 
@@ -404,7 +465,6 @@ def check_user_id():
             "searched_variants": variants
         }), 200
 
-    # التحقق من وجود أخطاء
     has_errors = any("error" in key.lower() for key in results.keys())
     has_data = any("student_profiles" in key or "class_presence" in key or "class_teachers" in key for key in results.keys())
 
@@ -1372,6 +1432,29 @@ def update_leader_password():
             cursor.execute("UPDATE schools SET leader_password = %s WHERE school_id = %s", (new_password, school_id))
             connection.commit()
             return jsonify({"status": "success", "message": "تم تحديث سر الرئيس بنجاح"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+@app.route('/kick_user', methods=['POST'])
+def kick_user():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+    user_id = request.values.get('user_id')
+    if not school_id or not class_id or not user_id:
+        return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM class_presence WHERE school_id = %s AND class_id = %s AND user_id = %s", 
+                          (school_id, int(class_id), user_id))
+            cursor.execute("DELETE FROM class_teachers WHERE school_id = %s AND class_id = %s AND teacher_user_id = %s", 
+                          (school_id, int(class_id), user_id))
+            connection.commit()
+            return jsonify({"status": "success", "message": "تم الطرد بنجاح"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
