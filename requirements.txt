@@ -4,4 +4,4 @@ psycopg2-binary
 gunicorn
 python-dotenv
 requests
-agora-token-builder
+livekit-api
