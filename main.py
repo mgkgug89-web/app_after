@@ -93,17 +93,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # 🆕 جدول المعلمين المسجلين داخل الفصل
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS class_teachers (
-            id SERIAL PRIMARY KEY,
-            school_id VARCHAR(6) NOT NULL,
-            class_id INT NOT NULL,
-            teacher_id VARCHAR(255) NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS visitors (
             id SERIAL PRIMARY KEY,
@@ -124,6 +113,18 @@ def create_tables_if_not_exist(cursor):
             school_name VARCHAR(255),
             image_url TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # 🆕 جدول المعلمين (يربط بين ID الطالب والفصل)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS class_teachers (
+            id SERIAL PRIMARY KEY,
+            teacher_user_id VARCHAR(50) NOT NULL,
+            class_id INT NOT NULL,
+            school_id VARCHAR(6) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(teacher_user_id, class_id)
         )
     """)
 
@@ -169,72 +170,6 @@ def refresh_cache():
 init_all_databases()
 refresh_cache()
 
-# 🆕 مسارات المعلمين (تسجيل وجلب)
-@app.route('/register_teachers', methods=['POST'])
-def register_teachers():
-    school_id = request.values.get('school_id')
-    class_id = request.values.get('class_id')
-    teacher_ids = request.form.getlist('teacher_ids[]') or request.values.get('teacher_ids', '').split(',')
-
-    if not school_id or not class_id:
-        return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
-
-    connection = get_db_connection(school_id)
-    if not connection:
-        return jsonify({"status": "error", "message": "خطأ في الاتصال بقاعدة البيانات"}), 500
-
-    try:
-        with connection.cursor() as cursor:
-            create_tables_if_not_exist(cursor)
-            for t_id in teacher_ids:
-                clean_id = t_id.strip()
-                if clean_id:
-                    cursor.execute("SELECT id FROM class_teachers WHERE school_id = %s AND class_id = %s AND teacher_id = %s", (school_id, class_id, clean_id))
-                    if not cursor.fetchone():
-                        cursor.execute("INSERT INTO class_teachers (school_id, class_id, teacher_id) VALUES (%s, %s, %s)", (school_id, class_id, clean_id))
-            connection.commit()
-            return jsonify({"status": "success", "message": "تم تسجيل المعلمين بنجاح"}), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-    finally:
-        if connection: connection.close()
-
-@app.route('/get_connected_teachers', methods=['POST', 'GET'])
-def get_connected_teachers():
-    school_id = request.values.get('school_id')
-    class_id = request.values.get('class_id')
-
-    if not school_id or not class_id:
-        return jsonify({"status": "error", "teachers": []}), 400
-
-    connection = get_db_connection(school_id)
-    if not connection:
-        return jsonify({"status": "error", "teachers": []}), 500
-
-    try:
-        with connection.cursor() as cursor:
-            create_tables_if_not_exist(cursor)
-            cursor.execute("SELECT teacher_id FROM class_teachers WHERE school_id = %s AND class_id = %s", (school_id, class_id))
-            rows = cursor.fetchall()
-            
-            teachers_data = []
-            for row in rows:
-                t_id = row['teacher_id']
-                cursor.execute("SELECT full_name FROM student_profiles WHERE user_id = %s OR device_id = %s", (t_id, t_id))
-                profile = cursor.fetchone()
-                name = profile['full_name'] if profile and profile['full_name'] else f"الأستاذ ({t_id})"
-                
-                teachers_data.append({
-                    "id": t_id,
-                    "name": name
-                })
-
-            return jsonify({"status": "success", "teachers": teachers_data}), 200
-    except Exception as e:
-        return jsonify({"status": "error", "teachers": [], "message": str(e)}), 500
-    finally:
-        if connection: connection.close()
-
 @app.route('/save_user_profile', methods=['POST'])
 def save_user_profile():
     device_id = request.values.get('device_id')
@@ -254,6 +189,7 @@ def save_user_profile():
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
+            
             image_url = None
             if image_base64:
                 try:
@@ -623,7 +559,7 @@ def get_classes():
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
-            cursor.execute("SELECT id, class_name, class_password, image_url FROM classes WHERE school_id = %s ORDER BY id DESC", (school_id,))
+            cursor.execute("SELECT id, school_id, class_name, class_password, image_url FROM classes WHERE school_id = %s ORDER BY id DESC", (school_id,))
             classes = cursor.fetchall()
             return jsonify({"status": "success", "classes": classes}), 200
     except Exception:
@@ -707,6 +643,108 @@ def update_class_password():
             return jsonify({"status": "success", "message": "تم تحديث كلمة السر بنجاح"}), 200
     except Exception:
         return jsonify({"status": "error", "message": "خطأ في التحديث"}), 500
+    finally:
+        if connection: connection.close()
+
+# 🆕 تسجيل معلمين (يقبل IDs مفصولة بفاصلة)
+@app.route('/register_teachers', methods=['POST'])
+def register_teachers():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+    teacher_ids = request.values.get('teacher_ids', '')
+
+    if not school_id or not class_id or not teacher_ids:
+        return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
+
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+
+    try:
+        ids_list = [tid.strip() for tid in teacher_ids.split(",") if tid.strip()]
+        if not ids_list:
+            return jsonify({"status": "error", "message": "لا توجد IDs صالحة"}), 400
+
+        with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            added_count = 0
+            invalid_ids = []
+
+            for tid in ids_list:
+                # التحقق من وجود المستخدم في student_profiles
+                cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s", (tid,))
+                exists = cursor.fetchone()
+
+                if not exists:
+                    invalid_ids.append(tid)
+                    continue
+
+                cursor.execute("""
+                    INSERT INTO class_teachers (teacher_user_id, class_id, school_id)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (teacher_user_id, class_id) DO NOTHING
+                """, (tid, int(class_id), school_id))
+                added_count += 1
+
+            connection.commit()
+
+            if added_count == 0 and invalid_ids:
+                return jsonify({
+                    "status": "error",
+                    "message": f"جميع الإيديهات غير صحيحة: {', '.join(invalid_ids)}"
+                }), 400
+
+            msg = f"تم تسجيل {added_count} معلم بنجاح"
+            if invalid_ids:
+                msg += f" | إيديهات غير موجودة: {', '.join(invalid_ids)}"
+
+            return jsonify({"status": "success", "message": msg}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+# 🆕 جلب المعلمين المتصلين بفصل معين (مع بياناتهم الحقيقية)
+@app.route('/get_connected_teachers', methods=['POST'])
+def get_connected_teachers():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+
+    if not school_id or not class_id:
+        return jsonify({"status": "error", "teachers": []}), 400
+
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "teachers": []}), 500
+
+    try:
+        with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            cursor.execute("""
+                SELECT 
+                    ct.teacher_user_id,
+                    sp.full_name,
+                    sp.image_url,
+                    sp.device_id
+                FROM class_teachers ct
+                LEFT JOIN student_profiles sp ON sp.user_id = ct.teacher_user_id
+                WHERE ct.school_id = %s AND ct.class_id = %s
+                ORDER BY ct.id DESC
+            """, (school_id, int(class_id)))
+            rows = cursor.fetchall()
+
+            teachers = []
+            for r in rows:
+                teachers.append({
+                    "id": r['teacher_user_id'] or "",
+                    "name": r['full_name'] or "معلم",
+                    "device_id": r['device_id'] or "",
+                    "image_url": r['image_url'] or ""
+                })
+
+            return jsonify({"status": "success", "teachers": teachers}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e), "teachers": []}), 500
     finally:
         if connection: connection.close()
 
