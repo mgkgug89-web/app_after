@@ -702,15 +702,36 @@ def register_teachers():
             added_count = 0
             invalid_ids = []
             for tid in ids_list:
-                # 🆕 التحقق من وجود المستخدم في أي من الجدولين
+                # 🆕 البحث عن الـ user_id (الـ 6 أرقام) في كل الجداول
+                found = False
+                
+                # 1. البحث في student_profiles
                 cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s", (tid,))
-                exists = cursor.fetchone()
-                if not exists:
+                if cursor.fetchone():
+                    found = True
+                
+                # 2. البحث في class_presence (حسب الفصل الحالي)
+                if not found:
+                    cursor.execute("SELECT user_id FROM class_presence WHERE user_id = %s AND class_id = %s", (tid, int(class_id)))
+                    if cursor.fetchone():
+                        found = True
+                
+                # 3. البحث في class_presence (أي فصل آخر)
+                if not found:
                     cursor.execute("SELECT user_id FROM class_presence WHERE user_id = %s LIMIT 1", (tid,))
-                    exists = cursor.fetchone()
-                if not exists:
+                    if cursor.fetchone():
+                        found = True
+                
+                # 4. البحث في mic_requests
+                if not found:
+                    cursor.execute("SELECT student_user_id FROM mic_requests WHERE student_user_id = %s LIMIT 1", (tid,))
+                    if cursor.fetchone():
+                        found = True
+
+                if not found:
                     invalid_ids.append(tid)
                     continue
+                    
                 cursor.execute("""
                     INSERT INTO class_teachers (teacher_user_id, class_id, school_id)
                     VALUES (%s, %s, %s)
@@ -719,10 +740,10 @@ def register_teachers():
                 added_count += 1
             connection.commit()
             if added_count == 0 and invalid_ids:
-                return jsonify({"status": "error", "message": f"جميع الإيديهات غير صحيحة: {', '.join(invalid_ids)}"}), 400
+                return jsonify({"status": "error", "message": f"لم يتم العثور على المستخدمين: {', '.join(invalid_ids)}"}), 404
             msg = f"تم تسجيل {added_count} معلم بنجاح"
             if invalid_ids:
-                msg += f" | إيديهات غير موجودة: {', '.join(invalid_ids)}"
+                msg += f" | لم يتم العثور على: {', '.join(invalid_ids)}"
             return jsonify({"status": "success", "message": msg}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
