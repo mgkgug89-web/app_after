@@ -2,6 +2,7 @@ import os
 import secrets
 import string
 import time
+from datetime import timedelta # 🆕 أضفنا هذا السطر هنا
 import psycopg2
 import requests
 import base64
@@ -220,7 +221,7 @@ def get_livekit_token():
                 can_publish=True,
                 can_subscribe=True,
             )) \
-            .with_ttl(3600) \
+            .with_ttl(timedelta(seconds=3600)) \ # 🆕 التعديل هنا
             .to_jwt()
 
         return jsonify({
