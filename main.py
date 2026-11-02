@@ -131,7 +131,7 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # 🆕 جدول المعلمين - نُنشئه بالعمود الصحيح من البداية
+    # 🆕 جدول المعلمين - نُنشئه بدون أي قيد NOT NULL على teacher_id
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS class_teachers (
             id SERIAL PRIMARY KEY,
@@ -142,8 +142,15 @@ def create_tables_if_not_exist(cursor):
         )
     """)
     
+    # محاولة إضافة الأعمدة إذا لم تكن موجودة (لن يؤثر إذا كانت موجودة)
     try:
         cursor.execute("ALTER TABLE class_teachers ADD COLUMN IF NOT EXISTS teacher_user_id VARCHAR(50);")
+    except Exception:
+        pass
+    
+    # 🆕 إزالة القيد NOT NULL من teacher_id إذا كان موجوداً (لكي لا يفشل الإدخال)
+    try:
+        cursor.execute("ALTER TABLE class_teachers ALTER COLUMN teacher_id DROP NOT NULL;")
     except Exception:
         pass
 
@@ -309,6 +316,15 @@ def fix_all_tables():
             except Exception as e:
                 conn.rollback()
                 db_result["steps"]["add_column"] = f"error: {str(e)}"
+            
+            # 🆕 إزالة NOT NULL من teacher_id (العمود القديم)
+            try:
+                cursor.execute("ALTER TABLE class_teachers ALTER COLUMN teacher_id DROP NOT NULL;")
+                conn.commit()
+                db_result["steps"]["drop_not_null_teacher_id"] = "success"
+            except Exception as e:
+                conn.rollback()
+                db_result["steps"]["drop_not_null_teacher_id"] = f"error: {str(e)}"
             
             try:
                 cursor.execute("""
@@ -1023,7 +1039,7 @@ def update_class_password():
         if connection: connection.close()
 
 # ============================================================
-# 🆕 register_teachers - النسخة النهائية (بدون ON CONFLICT)
+# 🆕 register_teachers - النسخة النهائية (تدعم teacher_id و teacher_user_id)
 # ============================================================
 @app.route('/register_teachers', methods=['POST'])
 def register_teachers():
@@ -1044,6 +1060,16 @@ def register_teachers():
         
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
+            
+            # 🆕 اكتشاف بنية الجدول
+            cursor.execute("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_name = 'class_teachers'
+            """)
+            existing_columns = [row['column_name'] for row in cursor.fetchall()]
+            has_teacher_id = 'teacher_id' in existing_columns
+            has_teacher_user_id = 'teacher_user_id' in existing_columns
+            
             added_count = 0
             invalid_ids = []
             failed_inserts = []
@@ -1102,21 +1128,51 @@ def register_teachers():
                     invalid_ids.append(tid)
                     continue
 
-                # الحل الجديد: لا نستخدم ON CONFLICT
+                # 🆕 التحقق من وجوده مسبقاً (بأي عمود متاح)
                 try:
-                    cursor.execute(
-                        "SELECT id FROM class_teachers WHERE teacher_user_id = %s AND class_id = %s",
-                        (found_id, int(class_id))
-                    )
-                    existing = cursor.fetchone()
+                    if has_teacher_user_id:
+                        cursor.execute(
+                            "SELECT id FROM class_teachers WHERE teacher_user_id = %s AND class_id = %s",
+                            (found_id, int(class_id))
+                        )
+                        existing = cursor.fetchone()
+                        if existing:
+                            continue
+                    elif has_teacher_id:
+                        cursor.execute(
+                            "SELECT id FROM class_teachers WHERE teacher_id = %s AND class_id = %s",
+                            (found_id, int(class_id))
+                        )
+                        existing = cursor.fetchone()
+                        if existing:
+                            continue
                     
-                    if existing:
+                    # 🆕 إدخال ديناميكي حسب الأعمدة الموجودة
+                    if has_teacher_id and has_teacher_user_id:
+                        # كلا العمودين موجودان - نملأ كليهما
+                        cursor.execute("""
+                            INSERT INTO class_teachers (teacher_id, teacher_user_id, class_id, school_id)
+                            VALUES (%s, %s, %s, %s)
+                        """, (found_id, found_id, int(class_id), school_id))
+                    elif has_teacher_user_id:
+                        # فقط teacher_user_id
+                        cursor.execute("""
+                            INSERT INTO class_teachers (teacher_user_id, class_id, school_id)
+                            VALUES (%s, %s, %s)
+                        """, (found_id, int(class_id), school_id))
+                    elif has_teacher_id:
+                        # فقط teacher_id
+                        cursor.execute("""
+                            INSERT INTO class_teachers (teacher_id, class_id, school_id)
+                            VALUES (%s, %s, %s)
+                        """, (found_id, int(class_id), school_id))
+                    else:
+                        failed_inserts.append({
+                            "teacher_id": found_id,
+                            "error": "لا يوجد عمود teacher_id أو teacher_user_id في الجدول"
+                        })
                         continue
                     
-                    cursor.execute("""
-                        INSERT INTO class_teachers (teacher_user_id, class_id, school_id)
-                        VALUES (%s, %s, %s)
-                    """, (found_id, int(class_id), school_id))
                     added_count += 1
                     
                 except Exception as insert_err:
@@ -1132,7 +1188,8 @@ def register_teachers():
                 return jsonify({
                     "status": "error",
                     "message": "فشل إدخال المعلمين",
-                    "errors": failed_inserts
+                    "errors": failed_inserts,
+                    "columns_detected": {"teacher_id": has_teacher_id, "teacher_user_id": has_teacher_user_id}
                 }), 500
             
             if added_count == 0 and invalid_ids:
@@ -1173,14 +1230,32 @@ def get_connected_teachers():
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
+            
+            # 🆕 اكتشاف بنية الجدول
             cursor.execute("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_name = 'class_teachers'
+            """)
+            existing_columns = [row['column_name'] for row in cursor.fetchall()]
+            has_teacher_id = 'teacher_id' in existing_columns
+            has_teacher_user_id = 'teacher_user_id' in existing_columns
+            
+            # 🆕 اختيار العمود الصحيح
+            if has_teacher_user_id:
+                teacher_col = 'teacher_user_id'
+            elif has_teacher_id:
+                teacher_col = 'teacher_id'
+            else:
+                return jsonify({"status": "error", "teachers": [], "message": "no teacher column found"}), 500
+            
+            cursor.execute(f"""
                 SELECT 
-                    ct.teacher_user_id,
+                    ct.{teacher_col} as teacher_col,
                     sp.full_name,
                     sp.image_url,
                     sp.device_id
                 FROM class_teachers ct
-                LEFT JOIN student_profiles sp ON sp.user_id = ct.teacher_user_id
+                LEFT JOIN student_profiles sp ON sp.user_id = ct.{teacher_col}
                 WHERE ct.school_id = %s AND ct.class_id = %s
                 ORDER BY ct.id DESC
             """, (school_id, int(class_id)))
@@ -1188,7 +1263,7 @@ def get_connected_teachers():
             teachers = []
             for r in rows:
                 teachers.append({
-                    "id": r['teacher_user_id'] or "",
+                    "id": r['teacher_col'] or "",
                     "name": r['full_name'] or "معلم",
                     "device_id": r['device_id'] or "",
                     "image_url": r['image_url'] or ""
@@ -1473,8 +1548,15 @@ def kick_user():
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM class_presence WHERE school_id = %s AND class_id = %s AND user_id = %s", 
                           (school_id, int(class_id), user_id))
-            cursor.execute("DELETE FROM class_teachers WHERE school_id = %s AND class_id = %s AND teacher_user_id = %s", 
-                          (school_id, int(class_id), user_id))
+            try:
+                cursor.execute("DELETE FROM class_teachers WHERE school_id = %s AND class_id = %s AND teacher_user_id = %s", 
+                              (school_id, int(class_id), user_id))
+            except Exception:
+                try:
+                    cursor.execute("DELETE FROM class_teachers WHERE school_id = %s AND class_id = %s AND teacher_id = %s", 
+                                  (school_id, int(class_id), user_id))
+                except Exception:
+                    pass
             connection.commit()
             return jsonify({"status": "success", "message": "تم الطرد بنجاح"}), 200
     except Exception as e:
