@@ -4,87 +4,21 @@ import string
 import psycopg2
 import requests
 import base64
+import io
 from psycopg2.extras import RealDictCursor
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
-
-# استيراد مكتبة LiveKit الرسمية (تم تصحيح VideoGrants للنسخ الحديثة)
-from livekit.api import AccessToken, VideoGrants
 
 load_dotenv()
 app = Flask(__name__)
 CORS(app)
 app.json.ensure_ascii = False
 
-# كلمة سر الإدارة تعتمد حصرياً على متغيرات البيئة لأمان تام
-ADMIN_SECRET_PASSWORD = os.environ.get("ADMIN_SECRET_PASSWORD")
-
-# بيانات LiveKit الحقيقية الخاصة بك
-LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "wss://distancelearning-mlptg6d9.livekit.cloud")
-LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "APIhkgDG7rG9dVa")
-LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
+ADMIN_SECRET_PASSWORD = "2573486195715653N"
 
 cached_schools = []
 
-# --- مسار توليد LiveKit Access Token للفصول الدراسية (بتحقق أمني صارم) ---
-@app.route('/get_livekit_token', methods=['POST'])
-def get_livekit_token():
-    school_id = request.values.get('school_id')
-    room_name = request.values.get('room_name')  # اسم الفصل الفريد
-    participant_name = request.values.get('participant_name') # اسم الطالب الحقيقي
-    is_teacher = request.values.get('is_teacher', 'false').lower() == 'true'
-    
-    # 1. التحقق من المدخلات الأساسية
-    if not school_id or not room_name or not participant_name:
-        return jsonify({"status": "error", "message": "بيانات غير مكتملة (school_id, room_name, participant_name مطلوبة)"}), 400
-
-    if not LIVEKIT_API_SECRET:
-        return jsonify({"status": "error", "message": "LiveKit API Secret غير متوفر على السيرفر"}), 500
-
-    # 2. التحقق الأمني الحقيقي من وجود المدرسة في قاعدة البيانات
-    connection = get_db_connection(school_id)
-    if not connection:
-        return jsonify({"status": "error", "message": "فشل الاتصال بقاعدة بيانات المدرسة"}), 500
-    
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT id, school_name FROM schools WHERE school_id = %s", (school_id,))
-            school = cursor.fetchone()
-            if not school:
-                return jsonify({"status": "error", "message": "هذه المدرسة غير مسجلة في النظام"}), 404
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"خطأ في التحقق من المدرسة: {str(e)}"}), 500
-    finally:
-        connection.close()
-
-    try:
-        # 3. تحديد الصلاحيات حسب دور المستخدم (معلم أو طالب) باستخدام VideoGrants الصحيحة
-        can_pub = True if is_teacher else True 
-        
-        token = AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET) \
-            .with_identity(participant_name) \
-            .with_name(participant_name) \
-            .with_grants(VideoGrants(
-                room_join=True,
-                room=room_name,
-                can_publish=can_pub,
-                can_subscribe=True
-            ))
-        
-        jwt_token = token.to_jwt()
-        
-        return jsonify({
-            "status": "success",
-            "url": LIVEKIT_URL,
-            "room_name": room_name,
-            "token": jwt_token,
-            "participant_name": participant_name
-        }), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-# --- قواعد البيانات وسيرفر البايثون ---
 def get_db_index(school_id):
     if not school_id or not str(school_id)[0].isdigit():
         return 0
@@ -159,6 +93,17 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
+    # 🆕 جدول المعلمين المسجلين داخل الفصل
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS class_teachers (
+            id SERIAL PRIMARY KEY,
+            school_id VARCHAR(6) NOT NULL,
+            class_id INT NOT NULL,
+            teacher_id VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS visitors (
             id SERIAL PRIMARY KEY,
@@ -224,6 +169,72 @@ def refresh_cache():
 init_all_databases()
 refresh_cache()
 
+# 🆕 مسارات المعلمين (تسجيل وجلب)
+@app.route('/register_teachers', methods=['POST'])
+def register_teachers():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+    teacher_ids = request.form.getlist('teacher_ids[]') or request.values.get('teacher_ids', '').split(',')
+
+    if not school_id or not class_id:
+        return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
+
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال بقاعدة البيانات"}), 500
+
+    try:
+        with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            for t_id in teacher_ids:
+                clean_id = t_id.strip()
+                if clean_id:
+                    cursor.execute("SELECT id FROM class_teachers WHERE school_id = %s AND class_id = %s AND teacher_id = %s", (school_id, class_id, clean_id))
+                    if not cursor.fetchone():
+                        cursor.execute("INSERT INTO class_teachers (school_id, class_id, teacher_id) VALUES (%s, %s, %s)", (school_id, class_id, clean_id))
+            connection.commit()
+            return jsonify({"status": "success", "message": "تم تسجيل المعلمين بنجاح"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+@app.route('/get_connected_teachers', methods=['POST', 'GET'])
+def get_connected_teachers():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+
+    if not school_id or not class_id:
+        return jsonify({"status": "error", "teachers": []}), 400
+
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "teachers": []}), 500
+
+    try:
+        with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            cursor.execute("SELECT teacher_id FROM class_teachers WHERE school_id = %s AND class_id = %s", (school_id, class_id))
+            rows = cursor.fetchall()
+            
+            teachers_data = []
+            for row in rows:
+                t_id = row['teacher_id']
+                cursor.execute("SELECT full_name FROM student_profiles WHERE user_id = %s OR device_id = %s", (t_id, t_id))
+                profile = cursor.fetchone()
+                name = profile['full_name'] if profile and profile['full_name'] else f"الأستاذ ({t_id})"
+                
+                teachers_data.append({
+                    "id": t_id,
+                    "name": name
+                })
+
+            return jsonify({"status": "success", "teachers": teachers_data}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "teachers": [], "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
 @app.route('/save_user_profile', methods=['POST'])
 def save_user_profile():
     device_id = request.values.get('device_id')
@@ -243,7 +254,6 @@ def save_user_profile():
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
-            
             image_url = None
             if image_base64:
                 try:
@@ -330,7 +340,7 @@ def verify_school():
 @app.route('/verify_admin', methods=['POST'])
 def verify_admin():
     password = request.values.get('password')
-    if ADMIN_SECRET_PASSWORD and password == ADMIN_SECRET_PASSWORD:
+    if password == ADMIN_SECRET_PASSWORD:
         return jsonify({"status": "success", "message": "تم التحقق"}), 200
     else:
         return jsonify({"status": "error", "message": "كلمة السر غير صحيحة"}), 401
@@ -474,11 +484,7 @@ def get_visitors():
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
-            cursor.execute(
-                "SELECT id, visitor_device_id, status FROM visitors "
-                "WHERE school_id = %s AND status = 'pending' ORDER BY id DESC",
-                (school_id,)
-            )
+            cursor.execute("SELECT id, visitor_device_id, status FROM visitors WHERE school_id = %s AND status = 'pending' ORDER BY id DESC", (school_id,))
             visitors = cursor.fetchall()
             return jsonify({"status": "success", "visitors": visitors}), 200
     except Exception:
@@ -706,7 +712,7 @@ def update_class_password():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"message": "Secure School & Classes API with LiveKit Integration is running successfully!"}), 200
+    return jsonify({"message": "School & Classes API is running successfully!"}), 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
