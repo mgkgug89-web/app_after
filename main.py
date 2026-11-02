@@ -16,7 +16,6 @@ CORS(app)
 app.json.ensure_ascii = False
 
 ADMIN_SECRET_PASSWORD = "2573486195715653N"
-
 cached_schools = []
 
 def get_db_index(school_id):
@@ -33,10 +32,8 @@ def get_db_connection(school_id=None):
         user = os.environ.get(f"DB_USER_{db_index}", "avnadmin")
         dbname = os.environ.get(f"DB_NAME_{db_index}", "defaultdb")
         port = os.environ.get(f"DB_PORT_{db_index}", "13153")
-
         if not host or not password:
             return None
-
         return psycopg2.connect(
             host=host, user=user, password=password,
             database=dbname, port=port,
@@ -72,7 +69,6 @@ def create_tables_if_not_exist(cursor):
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS admin_keys (
             id SERIAL PRIMARY KEY,
@@ -81,7 +77,6 @@ def create_tables_if_not_exist(cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS classes (
             id SERIAL PRIMARY KEY,
@@ -92,7 +87,6 @@ def create_tables_if_not_exist(cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS visitors (
             id SERIAL PRIMARY KEY,
@@ -102,7 +96,6 @@ def create_tables_if_not_exist(cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS student_profiles (
             id SERIAL PRIMARY KEY,
@@ -116,7 +109,7 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # 🆕 جدول المعلمين (يربط بين ID الطالب والفصل)
+    # 🆕 جدول المعلمين
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS class_teachers (
             id SERIAL PRIMARY KEY,
@@ -125,6 +118,19 @@ def create_tables_if_not_exist(cursor):
             school_id VARCHAR(6) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(teacher_user_id, class_id)
+        )
+    """)
+
+    # 🆕 جدول حضور الطلاب
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS class_presence (
+            id SERIAL PRIMARY KEY,
+            school_id VARCHAR(6) NOT NULL,
+            class_id INT NOT NULL,
+            device_id VARCHAR(255) NOT NULL,
+            user_id VARCHAR(50),
+            last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(device_id, class_id)
         )
     """)
 
@@ -163,7 +169,6 @@ def refresh_cache():
             pass
         finally:
             if connection: connection.close()
-            
     all_schools.sort(key=lambda x: x['school_id'], reverse=True)
     cached_schools = all_schools
 
@@ -178,18 +183,14 @@ def save_user_profile():
     age = request.values.get('age')
     school_name = request.values.get('school_name')
     image_base64 = request.values.get('image_base64', '')
-
     if not device_id:
         return jsonify({"status": "error", "message": "معرف الجهاز مطلوب"}), 400
-
     connection = get_db_connection("0")
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال بقاعدة البيانات"}), 500
-
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
-            
             image_url = None
             if image_base64:
                 try:
@@ -203,12 +204,10 @@ def save_user_profile():
                         image_url = response.text.strip()
                 except Exception:
                     pass
-
             cursor.execute("SELECT image_url FROM student_profiles WHERE device_id = %s", (device_id,))
             existing = cursor.fetchone()
             if not image_url and existing:
                 image_url = existing['image_url']
-
             cursor.execute("""
                 INSERT INTO student_profiles (device_id, user_id, full_name, age, school_name, image_url, updated_at)
                 VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
@@ -220,7 +219,6 @@ def save_user_profile():
                     image_url = COALESCE(EXCLUDED.image_url, student_profiles.image_url),
                     updated_at = CURRENT_TIMESTAMP
             """, (device_id, user_id, full_name, age, school_name, image_url))
-            
             connection.commit()
             return jsonify({"status": "success", "message": "تم حفظ ملف الطالب بنجاح", "image_url": image_url}), 200
     except Exception as e:
@@ -233,11 +231,9 @@ def get_user_profile():
     device_id = request.values.get('device_id')
     if not device_id:
         return jsonify({"status": "error", "message": "معرف الجهاز مطلوب"}), 400
-
     connection = get_db_connection("0")
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
-
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
@@ -256,7 +252,6 @@ def verify_school():
     school_id = request.values.get('school_id')
     if not school_id:
         return jsonify({"status": "error", "school_name": None, "message": "الرجاء إدخال إيدي المدرسة"}), 400
-    
     connection = get_db_connection(school_id)
     if not connection:
         return jsonify({"status": "error", "school_name": None, "message": "خطأ في الاتصال بقاعدة البيانات"}), 500
@@ -287,7 +282,6 @@ def verify_school_admin():
     password = request.values.get('password')
     if not school_id or not password:
         return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
-    
     connection = get_db_connection(school_id)
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
@@ -309,7 +303,6 @@ def update_school_admin_password():
     new_password = request.values.get('new_password')
     if not school_id or not new_password:
         return jsonify({"status": "error", "message": "بيانات غير كافية"}), 400
-    
     connection = get_db_connection(school_id)
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
@@ -329,10 +322,8 @@ def set_school_status():
     school_id = request.values.get('school_id')
     is_closed = request.values.get('is_closed')
     close_password = request.values.get('close_password', '1234')
-
     if not school_id or is_closed is None:
         return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
-
     connection = get_db_connection(school_id)
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
@@ -449,11 +440,9 @@ def approve_visitor():
 def generate_key():
     alphabet = string.ascii_uppercase + string.digits
     key = ''.join(secrets.choice(alphabet) for _ in range(12))
-    
     connection = get_db_connection("0")
     if not connection:
         return jsonify({"status": "error", "message": "السيرفر لا يستطيع الاتصال"}), 500
-        
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
@@ -462,7 +451,6 @@ def generate_key():
                 if not cursor.fetchone():
                     break
                 key = ''.join(secrets.choice(alphabet) for _ in range(12))
-
             cursor.execute("INSERT INTO admin_keys (key_value) VALUES (%s)", (key,))
             connection.commit()
         return jsonify({"status": "success", "key": key}), 200
@@ -477,10 +465,8 @@ def create_school():
     admin_password = request.values.get('admin_password')
     device_id = request.values.get('device_id', '')
     image_base64 = request.values.get('image_base64', '')
-    
     if not school_name or not admin_password:
         return jsonify({"status": "error", "message": "الرجاء إدخال الاسم وكلمة المرور"}), 400
-
     school_id = None
     for _ in range(20):
         temp_id = ''.join(secrets.choice(string.digits) for _ in range(6))
@@ -496,23 +482,18 @@ def create_school():
                     break
         finally:
             if conn: conn.close()
-
     if not school_id:
         return jsonify({"status": "error", "message": "فشل في توليد إيدي، حاول مرة أخرى"}), 500
-
     connection = get_db_connection(school_id)
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال بقاعدة البيانات"}), 500
-
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
             cursor.execute("SELECT id FROM admin_keys WHERE key_value = %s AND is_used = 0", (admin_password.strip(),))
             key_row = cursor.fetchone()
-            
             if not key_row:
                 return jsonify({"status": "error", "message": "كلمة السر غير صحيحة أو تم استخدامها مسبقاً!"}), 400
-
             image_url = ""
             if image_base64:
                 try:
@@ -526,16 +507,12 @@ def create_school():
                         image_url = response.text.strip()
                 except Exception:
                     pass
-
             cursor.execute("INSERT INTO schools (school_id, school_name, admin_device_id, admin_password, is_closed) VALUES (%s, %s, %s, %s, 0) RETURNING id", (school_id, school_name, device_id, "123456"))
             new_school_db_id = cursor.fetchone()['id']
-
             if image_url:
                 cursor.execute("INSERT INTO school_images (school_id, image_url) VALUES (%s, %s)", (new_school_db_id, image_url))
-            
             cursor.execute("DELETE FROM admin_keys WHERE id = %s", (key_row['id'],))
             connection.commit()
-
         refresh_cache()
         return jsonify({"status": "success", "message": f"تم إنشاء المدرسة بنجاح! الإيدي: {school_id}"}), 200
     except Exception as e:
@@ -573,10 +550,8 @@ def create_class():
     class_name = request.values.get('class_name')
     class_password = request.values.get('class_password')
     image_base64 = request.values.get('image_base64', '')
-
     if not school_id or not class_name or not class_password:
         return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
-
     connection = get_db_connection(school_id)
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
@@ -596,7 +571,6 @@ def create_class():
                         image_url = response.text.strip()
                 except Exception:
                     pass
-
             cursor.execute("INSERT INTO classes (school_id, class_name, class_password, image_url) VALUES (%s, %s, %s, %s)", (school_id, class_name, class_password, image_url))
             connection.commit()
             refresh_cache()
@@ -646,77 +620,59 @@ def update_class_password():
     finally:
         if connection: connection.close()
 
-# 🆕 تسجيل معلمين (يقبل IDs مفصولة بفاصلة)
+# 🆕 تسجيل معلمين
 @app.route('/register_teachers', methods=['POST'])
 def register_teachers():
     school_id = request.values.get('school_id')
     class_id = request.values.get('class_id')
     teacher_ids = request.values.get('teacher_ids', '')
-
     if not school_id or not class_id or not teacher_ids:
         return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
-
     connection = get_db_connection(school_id)
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
-
     try:
         ids_list = [tid.strip() for tid in teacher_ids.split(",") if tid.strip()]
         if not ids_list:
             return jsonify({"status": "error", "message": "لا توجد IDs صالحة"}), 400
-
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
             added_count = 0
             invalid_ids = []
-
             for tid in ids_list:
-                # التحقق من وجود المستخدم في student_profiles
                 cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s", (tid,))
                 exists = cursor.fetchone()
-
                 if not exists:
                     invalid_ids.append(tid)
                     continue
-
                 cursor.execute("""
                     INSERT INTO class_teachers (teacher_user_id, class_id, school_id)
                     VALUES (%s, %s, %s)
                     ON CONFLICT (teacher_user_id, class_id) DO NOTHING
                 """, (tid, int(class_id), school_id))
                 added_count += 1
-
             connection.commit()
-
             if added_count == 0 and invalid_ids:
-                return jsonify({
-                    "status": "error",
-                    "message": f"جميع الإيديهات غير صحيحة: {', '.join(invalid_ids)}"
-                }), 400
-
+                return jsonify({"status": "error", "message": f"جميع الإيديهات غير صحيحة: {', '.join(invalid_ids)}"}), 400
             msg = f"تم تسجيل {added_count} معلم بنجاح"
             if invalid_ids:
                 msg += f" | إيديهات غير موجودة: {', '.join(invalid_ids)}"
-
             return jsonify({"status": "success", "message": msg}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if connection: connection.close()
 
-# 🆕 جلب المعلمين المتصلين بفصل معين (مع بياناتهم الحقيقية)
+# 🆕 جلب المعلمين المتصلين بالفصل
 @app.route('/get_connected_teachers', methods=['POST'])
 def get_connected_teachers():
     school_id = request.values.get('school_id')
     class_id = request.values.get('class_id')
-
     if not school_id or not class_id:
         return jsonify({"status": "error", "teachers": []}), 400
-
     connection = get_db_connection(school_id)
     if not connection:
         return jsonify({"status": "error", "teachers": []}), 500
-
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
@@ -732,7 +688,6 @@ def get_connected_teachers():
                 ORDER BY ct.id DESC
             """, (school_id, int(class_id)))
             rows = cursor.fetchall()
-
             teachers = []
             for r in rows:
                 teachers.append({
@@ -741,10 +696,134 @@ def get_connected_teachers():
                     "device_id": r['device_id'] or "",
                     "image_url": r['image_url'] or ""
                 })
-
             return jsonify({"status": "success", "teachers": teachers}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e), "teachers": []}), 500
+    finally:
+        if connection: connection.close()
+
+# 🆕 انضمام الطالب للفصل
+@app.route('/join_class', methods=['POST'])
+def join_class():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+    device_id = request.values.get('device_id')
+    user_id = request.values.get('user_id')
+    if not school_id or not class_id or not device_id:
+        return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            if not user_id:
+                cursor.execute("SELECT user_id FROM student_profiles WHERE device_id = %s", (device_id,))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row['user_id']
+            cursor.execute("""
+                INSERT INTO class_presence (school_id, class_id, device_id, user_id, last_seen)
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (device_id, class_id) DO UPDATE SET
+                    last_seen = CURRENT_TIMESTAMP,
+                    user_id = COALESCE(EXCLUDED.user_id, class_presence.user_id)
+            """, (school_id, int(class_id), device_id, user_id))
+            connection.commit()
+            return jsonify({"status": "success", "message": "تم الانضمام"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+# 🆕 جلب الطلاب الحاضرين
+@app.route('/get_class_presence', methods=['POST'])
+def get_class_presence():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+    if not school_id or not class_id:
+        return jsonify({"status": "error", "students": []}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "students": []}), 500
+    try:
+        with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            cursor.execute("""
+                SELECT 
+                    cp.device_id,
+                    cp.user_id,
+                    cp.last_seen,
+                    sp.full_name,
+                    sp.image_url
+                FROM class_presence cp
+                LEFT JOIN student_profiles sp ON sp.device_id = cp.device_id
+                WHERE cp.school_id = %s 
+                  AND cp.class_id = %s
+                  AND cp.last_seen > NOW() - INTERVAL '5 minutes'
+                ORDER BY cp.last_seen DESC
+            """, (school_id, int(class_id)))
+            rows = cursor.fetchall()
+            students = []
+            for r in rows:
+                students.append({
+                    "device_id": r['device_id'],
+                    "user_id": r['user_id'] or "",
+                    "full_name": r['full_name'] or "طالب",
+                    "image_url": r['image_url'] or "",
+                    "last_seen": r['last_seen'].isoformat() if r['last_seen'] else ""
+                })
+            return jsonify({"status": "success", "students": students}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e), "students": []}), 500
+    finally:
+        if connection: connection.close()
+
+# 🆕 نبضة الحضور
+@app.route('/heartbeat_class', methods=['POST'])
+def heartbeat_class():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+    device_id = request.values.get('device_id')
+    if not school_id or not class_id or not device_id:
+        return jsonify({"status": "error"}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error"}), 500
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                UPDATE class_presence SET last_seen = CURRENT_TIMESTAMP
+                WHERE school_id = %s AND class_id = %s AND device_id = %s
+            """, (school_id, int(class_id), device_id))
+            connection.commit()
+            return jsonify({"status": "success"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+# 🆕 خروج من الفصل
+@app.route('/leave_class', methods=['POST'])
+def leave_class():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+    device_id = request.values.get('device_id')
+    if not school_id or not class_id or not device_id:
+        return jsonify({"status": "error"}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error"}), 500
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                DELETE FROM class_presence 
+                WHERE school_id = %s AND class_id = %s AND device_id = %s
+            """, (school_id, int(class_id), device_id))
+            connection.commit()
+            return jsonify({"status": "success"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if connection: connection.close()
 
