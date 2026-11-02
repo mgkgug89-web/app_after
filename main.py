@@ -235,13 +235,100 @@ def get_livekit_token():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ============================================================
+# 🆕 Endpoint لفحص وجود user_id في قاعدة البيانات (جديد!)
+# ============================================================
+@app.route('/check_user_id', methods=['POST', 'GET'])
+def check_user_id():
+    """
+    فحص وجود user_id في كل قواعد البيانات
+    الاستخدام: curl -X POST "https://your-server.com/check_user_id" -d "user_id=STU-037708"
+    أو من المتصفح: /check_user_id?user_id=STU-037708
+    """
+    user_id = request.values.get('user_id')
+    if not user_id:
+        return jsonify({"status": "error", "message": "الرجاء إرسال user_id"}), 400
+
+    variants = [user_id]
+    if not user_id.startswith("STU-"):
+        variants.append(f"STU-{user_id}")
+    else:
+        variants.append(user_id.replace("STU-", ""))
+
+    results = {}
+    for i in range(5):
+        conn = get_db_connection(str(i * 2))
+        if not conn:
+            continue
+        try:
+            with conn.cursor() as cursor:
+                for variant in variants:
+                    # 1. student_profiles
+                    cursor.execute("SELECT device_id, user_id, full_name, age, school_name, image_url, updated_at FROM student_profiles WHERE user_id = %s", (variant,))
+                    profile = cursor.fetchone()
+                    if profile:
+                        results[f"DB_{i}_student_profiles_{variant}"] = {
+                            "device_id": profile['device_id'],
+                            "user_id": profile['user_id'],
+                            "full_name": profile['full_name'],
+                            "age": profile['age'],
+                            "school_name": profile['school_name'],
+                            "image_url": profile['image_url'],
+                            "updated_at": profile['updated_at'].isoformat() if profile['updated_at'] else None
+                        }
+
+                    # 2. class_presence
+                    cursor.execute("SELECT school_id, class_id, device_id, user_id, last_seen FROM class_presence WHERE user_id = %s", (variant,))
+                    presences = cursor.fetchall()
+                    if presences:
+                        results[f"DB_{i}_class_presence_{variant}"] = [
+                            {"school_id": p['school_id'], "class_id": p['class_id'], "device_id": p['device_id'], "last_seen": p['last_seen'].isoformat() if p['last_seen'] else None}
+                            for p in presences
+                        ]
+
+                    # 3. mic_requests
+                    cursor.execute("SELECT id, school_id, class_id, student_name FROM mic_requests WHERE student_user_id = %s", (variant,))
+                    mics = cursor.fetchall()
+                    if mics:
+                        results[f"DB_{i}_mic_requests_{variant}"] = [
+                            {"id": m['id'], "school_id": m['school_id'], "class_id": m['class_id'], "student_name": m['student_name']}
+                            for m in mics
+                        ]
+
+                    # 4. class_teachers
+                    cursor.execute("SELECT teacher_user_id, class_id, school_id FROM class_teachers WHERE teacher_user_id = %s", (variant,))
+                    teachers = cursor.fetchall()
+                    if teachers:
+                        results[f"DB_{i}_class_teachers_{variant}"] = [
+                            {"teacher_user_id": t['teacher_user_id'], "class_id": t['class_id'], "school_id": t['school_id']}
+                            for t in teachers
+                        ]
+        except Exception as e:
+            results[f"DB_{i}_error"] = str(e)
+        finally:
+            conn.close()
+
+    if not results:
+        return jsonify({
+            "status": "not_found",
+            "message": f"❌ الـ ID '{user_id}' غير موجود في أي جدول بأي قاعدة بيانات",
+            "searched_variants": variants
+        }), 200  # ← نعيد 200 بدلاً من 404 لعرض البيانات بشكل أفضل
+
+    return jsonify({
+        "status": "found",
+        "message": "✅ تم العثور على الـ ID في قاعدة البيانات",
+        "user_id": user_id,
+        "searched_variants": variants,
+        "results": results
+    }), 200
+
+# ============================================================
 # 🆕 Endpoint مؤقت لترحيل البيانات القديمة (احذفه بعد الاستخدام مرة واحدة)
 # ============================================================
 @app.route('/migrate_user_ids', methods=['POST'])
 def migrate_user_ids():
     """
     ⚠️ استخدم هذا الـ endpoint مرة واحدة فقط لترحيل البيانات القديمة
-    ثم احذفه أو قم بتعطيله من الكود
     """
     secret = request.values.get('secret')
     if secret != ADMIN_SECRET_PASSWORD:
@@ -254,7 +341,6 @@ def migrate_user_ids():
             continue
         try:
             with conn.cursor() as cursor:
-                # 1. تحديث student_profiles
                 cursor.execute("""
                     UPDATE student_profiles 
                     SET user_id = 'STU-' || user_id 
@@ -264,7 +350,6 @@ def migrate_user_ids():
                 """)
                 cnt1 = cursor.rowcount
 
-                # 2. تحديث class_presence
                 cursor.execute("""
                     UPDATE class_presence 
                     SET user_id = 'STU-' || user_id 
@@ -274,7 +359,6 @@ def migrate_user_ids():
                 """)
                 cnt2 = cursor.rowcount
 
-                # 3. تحديث mic_requests
                 cursor.execute("""
                     UPDATE mic_requests 
                     SET student_user_id = 'STU-' || student_user_id 
@@ -284,7 +368,6 @@ def migrate_user_ids():
                 """)
                 cnt3 = cursor.rowcount
 
-                # 4. تحديث class_teachers
                 cursor.execute("""
                     UPDATE class_teachers 
                     SET teacher_user_id = 'STU-' || teacher_user_id 
@@ -310,7 +393,47 @@ def migrate_user_ids():
     return jsonify({"status": "success", "results": results}), 200
 
 # ============================================================
-# باقي الـ Endpoints (كما هي بدون تغيير)
+# 🆕 Endpoint إضافي: فحص بـ device_id (مفيد للتشخيص)
+# ============================================================
+@app.route('/check_device_id', methods=['POST', 'GET'])
+def check_device_id():
+    """فحص وجود device_id في قاعدة البيانات"""
+    device_id = request.values.get('device_id')
+    if not device_id:
+        return jsonify({"status": "error", "message": "الرجاء إرسال device_id"}), 400
+
+    connection = get_db_connection("0")
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM student_profiles WHERE device_id = %s", (device_id,))
+            profile = cursor.fetchone()
+            if profile:
+                return jsonify({
+                    "status": "found",
+                    "message": "✅ الـ device_id موجود",
+                    "profile": {
+                        "device_id": profile['device_id'],
+                        "user_id": profile['user_id'],
+                        "full_name": profile['full_name'],
+                        "age": profile['age'],
+                        "school_name": profile['school_name'],
+                        "image_url": profile['image_url'],
+                        "updated_at": profile['updated_at'].isoformat() if profile['updated_at'] else None
+                    }
+                }), 200
+            return jsonify({
+                "status": "not_found",
+                "message": f"❌ الـ device_id '{device_id}' غير موجود في القاعدة"
+            }), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+# ============================================================
+# باقي الـ Endpoints (كما هي)
 # ============================================================
 
 @app.route('/save_user_profile', methods=['POST'])
@@ -781,15 +904,13 @@ def register_teachers():
             invalid_ids = []
             for raw_tid in ids_list:
                 tid = raw_tid
-                found_id = None  # الـ ID الفعلي الموجود في القاعدة
+                found_id = None
 
-                # 🆕 1. محاولة البحث كما هو (بصيغة STU-XXXXXX أو XXXXXX)
                 cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s LIMIT 1", (tid,))
                 r = cursor.fetchone()
                 if r:
                     found_id = r['user_id']
 
-                # 🆕 2. إذا لم يوجد، جرّب إضافة "STU-" إن لم تكن موجودة
                 if not found_id and not tid.startswith("STU-"):
                     alt = f"STU-{tid}"
                     cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s LIMIT 1", (alt,))
@@ -797,7 +918,6 @@ def register_teachers():
                     if r:
                         found_id = r['user_id']
 
-                # 🆕 3. إذا لم يوجد، جرّب إزالة "STU-" إن كانت موجودة
                 if not found_id and tid.startswith("STU-"):
                     alt = tid.replace("STU-", "")
                     cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s LIMIT 1", (alt,))
@@ -805,7 +925,6 @@ def register_teachers():
                     if r:
                         found_id = r['user_id']
 
-                # 🆕 4. البحث في class_presence (نفس المنطق)
                 if not found_id:
                     cursor.execute("SELECT user_id FROM class_presence WHERE user_id = %s AND class_id = %s LIMIT 1", (tid, int(class_id)))
                     r = cursor.fetchone()
@@ -824,7 +943,6 @@ def register_teachers():
                     if r:
                         found_id = r['user_id']
 
-                # 🆕 5. البحث في mic_requests
                 if not found_id:
                     cursor.execute("SELECT student_user_id FROM mic_requests WHERE student_user_id = %s LIMIT 1", (tid,))
                     r = cursor.fetchone()
@@ -847,7 +965,6 @@ def register_teachers():
                     invalid_ids.append(tid)
                     continue
 
-                # استخدم الـ ID الفعلي الموجود في القاعدة
                 cursor.execute("""
                     INSERT INTO class_teachers (teacher_user_id, class_id, school_id)
                     VALUES (%s, %s, %s)
