@@ -235,6 +235,81 @@ def get_livekit_token():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ============================================================
+# 🆕 Endpoint مؤقت لترحيل البيانات القديمة (احذفه بعد الاستخدام مرة واحدة)
+# ============================================================
+@app.route('/migrate_user_ids', methods=['POST'])
+def migrate_user_ids():
+    """
+    ⚠️ استخدم هذا الـ endpoint مرة واحدة فقط لترحيل البيانات القديمة
+    ثم احذفه أو قم بتعطيله من الكود
+    """
+    secret = request.values.get('secret')
+    if secret != ADMIN_SECRET_PASSWORD:
+        return jsonify({"status": "error", "message": "غير مصرح"}), 401
+    
+    results = []
+    for i in range(5):
+        conn = get_db_connection(str(i * 2))
+        if not conn:
+            continue
+        try:
+            with conn.cursor() as cursor:
+                # 1. تحديث student_profiles
+                cursor.execute("""
+                    UPDATE student_profiles 
+                    SET user_id = 'STU-' || user_id 
+                    WHERE user_id IS NOT NULL 
+                      AND user_id NOT LIKE 'STU-%' 
+                      AND LENGTH(user_id) = 6
+                """)
+                cnt1 = cursor.rowcount
+
+                # 2. تحديث class_presence
+                cursor.execute("""
+                    UPDATE class_presence 
+                    SET user_id = 'STU-' || user_id 
+                    WHERE user_id IS NOT NULL 
+                      AND user_id NOT LIKE 'STU-%' 
+                      AND LENGTH(user_id) = 6
+                """)
+                cnt2 = cursor.rowcount
+
+                # 3. تحديث mic_requests
+                cursor.execute("""
+                    UPDATE mic_requests 
+                    SET student_user_id = 'STU-' || student_user_id 
+                    WHERE student_user_id IS NOT NULL 
+                      AND student_user_id NOT LIKE 'STU-%' 
+                      AND LENGTH(student_user_id) = 6
+                """)
+                cnt3 = cursor.rowcount
+
+                # 4. تحديث class_teachers
+                cursor.execute("""
+                    UPDATE class_teachers 
+                    SET teacher_user_id = 'STU-' || teacher_user_id 
+                    WHERE teacher_user_id IS NOT NULL 
+                      AND teacher_user_id NOT LIKE 'STU-%' 
+                      AND LENGTH(teacher_user_id) = 6
+                """)
+                cnt4 = cursor.rowcount
+
+                conn.commit()
+                results.append({
+                    "db_index": i,
+                    "student_profiles": cnt1,
+                    "class_presence": cnt2,
+                    "mic_requests": cnt3,
+                    "class_teachers": cnt4
+                })
+        except Exception as e:
+            results.append({"db_index": i, "error": str(e)})
+        finally:
+            conn.close()
+    
+    return jsonify({"status": "success", "results": results}), 200
+
+# ============================================================
 # باقي الـ Endpoints (كما هي بدون تغيير)
 # ============================================================
 
@@ -683,6 +758,9 @@ def update_class_password():
     finally:
         if connection: connection.close()
 
+# ============================================================
+# 🆕 register_teachers المحدثة - تدعم STU-XXXXXX والقديم XXXXXX
+# ============================================================
 @app.route('/register_teachers', methods=['POST'])
 def register_teachers():
     school_id = request.values.get('school_id')
@@ -701,43 +779,82 @@ def register_teachers():
             create_tables_if_not_exist(cursor)
             added_count = 0
             invalid_ids = []
-            for tid in ids_list:
-                # 🆕 البحث عن الـ user_id (الـ 6 أرقام) في كل الجداول
-                found = False
-                
-                # 1. البحث في student_profiles
-                cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s", (tid,))
-                if cursor.fetchone():
-                    found = True
-                
-                # 2. البحث في class_presence (حسب الفصل الحالي)
-                if not found:
-                    cursor.execute("SELECT user_id FROM class_presence WHERE user_id = %s AND class_id = %s", (tid, int(class_id)))
-                    if cursor.fetchone():
-                        found = True
-                
-                # 3. البحث في class_presence (أي فصل آخر)
-                if not found:
-                    cursor.execute("SELECT user_id FROM class_presence WHERE user_id = %s LIMIT 1", (tid,))
-                    if cursor.fetchone():
-                        found = True
-                
-                # 4. البحث في mic_requests
-                if not found:
-                    cursor.execute("SELECT student_user_id FROM mic_requests WHERE student_user_id = %s LIMIT 1", (tid,))
-                    if cursor.fetchone():
-                        found = True
+            for raw_tid in ids_list:
+                tid = raw_tid
+                found_id = None  # الـ ID الفعلي الموجود في القاعدة
 
-                if not found:
+                # 🆕 1. محاولة البحث كما هو (بصيغة STU-XXXXXX أو XXXXXX)
+                cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s LIMIT 1", (tid,))
+                r = cursor.fetchone()
+                if r:
+                    found_id = r['user_id']
+
+                # 🆕 2. إذا لم يوجد، جرّب إضافة "STU-" إن لم تكن موجودة
+                if not found_id and not tid.startswith("STU-"):
+                    alt = f"STU-{tid}"
+                    cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s LIMIT 1", (alt,))
+                    r = cursor.fetchone()
+                    if r:
+                        found_id = r['user_id']
+
+                # 🆕 3. إذا لم يوجد، جرّب إزالة "STU-" إن كانت موجودة
+                if not found_id and tid.startswith("STU-"):
+                    alt = tid.replace("STU-", "")
+                    cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s LIMIT 1", (alt,))
+                    r = cursor.fetchone()
+                    if r:
+                        found_id = r['user_id']
+
+                # 🆕 4. البحث في class_presence (نفس المنطق)
+                if not found_id:
+                    cursor.execute("SELECT user_id FROM class_presence WHERE user_id = %s AND class_id = %s LIMIT 1", (tid, int(class_id)))
+                    r = cursor.fetchone()
+                    if r:
+                        found_id = r['user_id']
+                if not found_id and not tid.startswith("STU-"):
+                    alt = f"STU-{tid}"
+                    cursor.execute("SELECT user_id FROM class_presence WHERE user_id = %s AND class_id = %s LIMIT 1", (alt, int(class_id)))
+                    r = cursor.fetchone()
+                    if r:
+                        found_id = r['user_id']
+                if not found_id and tid.startswith("STU-"):
+                    alt = tid.replace("STU-", "")
+                    cursor.execute("SELECT user_id FROM class_presence WHERE user_id = %s AND class_id = %s LIMIT 1", (alt, int(class_id)))
+                    r = cursor.fetchone()
+                    if r:
+                        found_id = r['user_id']
+
+                # 🆕 5. البحث في mic_requests
+                if not found_id:
+                    cursor.execute("SELECT student_user_id FROM mic_requests WHERE student_user_id = %s LIMIT 1", (tid,))
+                    r = cursor.fetchone()
+                    if r:
+                        found_id = r['student_user_id']
+                if not found_id and not tid.startswith("STU-"):
+                    alt = f"STU-{tid}"
+                    cursor.execute("SELECT student_user_id FROM mic_requests WHERE student_user_id = %s LIMIT 1", (alt,))
+                    r = cursor.fetchone()
+                    if r:
+                        found_id = r['student_user_id']
+                if not found_id and tid.startswith("STU-"):
+                    alt = tid.replace("STU-", "")
+                    cursor.execute("SELECT student_user_id FROM mic_requests WHERE student_user_id = %s LIMIT 1", (alt,))
+                    r = cursor.fetchone()
+                    if r:
+                        found_id = r['student_user_id']
+
+                if not found_id:
                     invalid_ids.append(tid)
                     continue
-                    
+
+                # استخدم الـ ID الفعلي الموجود في القاعدة
                 cursor.execute("""
                     INSERT INTO class_teachers (teacher_user_id, class_id, school_id)
                     VALUES (%s, %s, %s)
                     ON CONFLICT (teacher_user_id, class_id) DO NOTHING
-                """, (tid, int(class_id), school_id))
+                """, (found_id, int(class_id), school_id))
                 added_count += 1
+
             connection.commit()
             if added_count == 0 and invalid_ids:
                 return jsonify({"status": "error", "message": f"لم يتم العثور على المستخدمين: {', '.join(invalid_ids)}"}), 404
