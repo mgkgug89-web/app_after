@@ -61,6 +61,8 @@ def create_tables_if_not_exist(cursor):
     cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS admin_password VARCHAR(255) DEFAULT '123456';")
     cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS is_closed SMALLINT DEFAULT 0;")
     cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS close_password VARCHAR(255) DEFAULT '1234';")
+    # 🆕 عمود كلمة سر رئيس الفصل
+    cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS leader_password VARCHAR(255) DEFAULT '123456';")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS school_images (
@@ -132,7 +134,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # 🆕 جدول طلبات المايك
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mic_requests (
             id SERIAL PRIMARY KEY,
@@ -834,7 +835,6 @@ def leave_class():
     finally:
         if connection: connection.close()
 
-# 🆕 طلب المايك من الطالب
 @app.route('/request_mic', methods=['POST'])
 def request_mic():
     school_id = request.values.get('school_id')
@@ -849,7 +849,6 @@ def request_mic():
     try:
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
-            # جلب بيانات الطالب
             cursor.execute(
                 "SELECT full_name, image_url FROM student_profiles WHERE device_id = %s",
                 (device_id,)
@@ -857,7 +856,6 @@ def request_mic():
             student = cursor.fetchone()
             full_name = student['full_name'] if student else "طالب"
             image_url = student['image_url'] if student else ""
-            # منع التكرار: إذا كان لديه طلب pending، لا نضيف آخر
             cursor.execute("""
                 SELECT id FROM mic_requests
                 WHERE student_device_id = %s AND class_id = %s AND status = 'pending'
@@ -876,7 +874,6 @@ def request_mic():
     finally:
         if connection: connection.close()
 
-# 🆕 جلب طلبات المايك للمعلم
 @app.route('/get_mic_requests', methods=['POST'])
 def get_mic_requests():
     school_id = request.values.get('school_id')
@@ -911,12 +908,11 @@ def get_mic_requests():
     finally:
         if connection: connection.close()
 
-# 🆕 الموافقة أو الرفض على طلب المايك
 @app.route('/respond_mic_request', methods=['POST'])
 def respond_mic_request():
     school_id = request.values.get('school_id')
     request_id = request.values.get('request_id')
-    action = request.values.get('action')  # 'approve' أو 'reject'
+    action = request.values.get('action')
     if not school_id or not request_id or action not in ['approve', 'reject']:
         return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
     connection = get_db_connection(school_id)
@@ -928,6 +924,53 @@ def respond_mic_request():
             cursor.execute("UPDATE mic_requests SET status = %s WHERE id = %s", (new_status, int(request_id)))
             connection.commit()
             return jsonify({"status": "success", "message": "تمت العملية"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+# 🆕 التحقق من سر رئيس الفصل
+@app.route('/verify_leader_password', methods=['POST'])
+def verify_leader_password():
+    school_id = request.values.get('school_id')
+    password = request.values.get('password')
+    if not school_id or not password:
+        return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT leader_password FROM schools WHERE school_id = %s", (school_id,))
+            row = cursor.fetchone()
+            if row and row['leader_password'] == password:
+                return jsonify({"status": "success", "message": "تم التحقق بنجاح"}), 200
+            return jsonify({"status": "error", "message": "كلمة سر الرئيس غير صحيحة"}), 401
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+# 🆕 تحديث سر رئيس الفصل
+@app.route('/update_leader_password', methods=['POST'])
+def update_leader_password():
+    school_id = request.values.get('school_id')
+    current_password = request.values.get('current_password')
+    new_password = request.values.get('new_password')
+    if not school_id or not current_password or not new_password:
+        return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT leader_password FROM schools WHERE school_id = %s", (school_id,))
+            row = cursor.fetchone()
+            if not row or row['leader_password'] != current_password:
+                return jsonify({"status": "error", "message": "كلمة السر الحالية غير صحيحة"}), 401
+            cursor.execute("UPDATE schools SET leader_password = %s WHERE school_id = %s", (new_password, school_id))
+            connection.commit()
+            return jsonify({"status": "success", "message": "تم تحديث سر الرئيس بنجاح"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
