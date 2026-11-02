@@ -9,8 +9,8 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-# استيراد مكتبة LiveKit الرسمية لتوليد الـ Tokens
-from livekit.api import AccessToken, VideoGrant
+# استيراد مكتبة LiveKit الرسمية (تم تصحيح VideoGrants للنسخ الحديثة)
+from livekit.api import AccessToken, VideoGrants
 
 load_dotenv()
 app = Flask(__name__)
@@ -59,13 +59,13 @@ def get_livekit_token():
         connection.close()
 
     try:
-        # 3. تحديد الصلاحيات حسب دور المستخدم (معلم أو طالب)
+        # 3. تحديد الصلاحيات حسب دور المستخدم (معلم أو طالب) باستخدام VideoGrants الصحيحة
         can_pub = True if is_teacher else True 
         
         token = AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET) \
             .with_identity(participant_name) \
             .with_name(participant_name) \
-            .with_grants(VideoGrant(
+            .with_grants(VideoGrants(
                 room_join=True,
                 room=room_name,
                 can_publish=can_pub,
