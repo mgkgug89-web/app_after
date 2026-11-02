@@ -132,7 +132,6 @@ def create_tables_if_not_exist(cursor):
     """)
 
     # 🆕 جدول المعلمين - نُنشئه بالعمود الصحيح من البداية
-    # إذا كان موجوداً بدون العمود، سنضيفه لاحقاً في fix_all_tables
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS class_teachers (
             id SERIAL PRIMARY KEY,
@@ -143,7 +142,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
     
-    # 🆕 محاولة إضافة العمود إذا لم يكن موجوداً (ستفشل بصمت إذا كان موجوداً)
     try:
         cursor.execute("ALTER TABLE class_teachers ADD COLUMN IF NOT EXISTS teacher_user_id VARCHAR(50);")
     except Exception:
@@ -265,16 +263,10 @@ def get_livekit_token():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ============================================================
-# 🆕 Endpoint إصلاح كل الجداول - نسخة محسّنة
-# يعمل عبر: /fix_all_tables?secret=XXX (GET) أو POST
+# 🆕 Endpoint إصلاح كل الجداول
 # ============================================================
 @app.route('/fix_all_tables', methods=['GET', 'POST'])
 def fix_all_tables():
-    """
-    إصلاح كل الجداول في قواعد البيانات الخمس
-    يعمل عبر المتصفح: /fix_all_tables?secret=2573486195715653N
-    أو عبر curl: -X POST -d "secret=2573486195715653N"
-    """
     secret = request.values.get('secret')
     if secret != ADMIN_SECRET_PASSWORD:
         return jsonify({"status": "error", "message": "غير مصرح"}), 401
@@ -292,10 +284,8 @@ def fix_all_tables():
         db_result = {"db_index": i, "steps": {}}
         
         try:
-            # ⚠️ كل عملية في transaction منفصل لضمان التنفيذ حتى لو فشل جزء
             cursor = conn.cursor()
             
-            # 1. التأكد من وجود الجدول
             try:
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS class_teachers (
@@ -312,7 +302,6 @@ def fix_all_tables():
                 conn.rollback()
                 db_result["steps"]["create_table"] = f"error: {str(e)}"
             
-            # 2. إضافة العمود إذا لم يكن موجوداً
             try:
                 cursor.execute("ALTER TABLE class_teachers ADD COLUMN IF NOT EXISTS teacher_user_id VARCHAR(50);")
                 conn.commit()
@@ -321,7 +310,6 @@ def fix_all_tables():
                 conn.rollback()
                 db_result["steps"]["add_column"] = f"error: {str(e)}"
             
-            # 3. إضافة القيد الفريد (اختياري، لن يؤثر إذا فشل)
             try:
                 cursor.execute("""
                     DO $$
@@ -344,7 +332,6 @@ def fix_all_tables():
                 conn.rollback()
                 db_result["steps"]["add_constraint"] = f"error: {str(e)}"
             
-            # 4. التحقق من نجاح الإصلاح
             try:
                 cursor.execute("""
                     SELECT column_name FROM information_schema.columns 
@@ -379,7 +366,7 @@ def fix_all_tables():
     }), 200
 
 # ============================================================
-# 🆕 Endpoint لفحص وجود user_id في قاعدة البيانات
+# 🆕 Endpoint لفحص وجود user_id
 # ============================================================
 @app.route('/check_user_id', methods=['POST', 'GET'])
 def check_user_id():
@@ -401,7 +388,6 @@ def check_user_id():
         try:
             with conn.cursor() as cursor:
                 for variant in variants:
-                    # 1. student_profiles
                     try:
                         cursor.execute("SELECT device_id, user_id, full_name, age, school_name, image_url, updated_at FROM student_profiles WHERE user_id = %s", (variant,))
                         profile = cursor.fetchone()
@@ -418,7 +404,6 @@ def check_user_id():
                     except Exception as e:
                         results[f"DB_{i}_student_profiles_error"] = str(e)
 
-                    # 2. class_presence
                     try:
                         cursor.execute("SELECT school_id, class_id, device_id, user_id, last_seen FROM class_presence WHERE user_id = %s", (variant,))
                         presences = cursor.fetchall()
@@ -430,7 +415,6 @@ def check_user_id():
                     except Exception as e:
                         results[f"DB_{i}_class_presence_error"] = str(e)
 
-                    # 3. mic_requests
                     try:
                         cursor.execute("SELECT id, school_id, class_id, student_name FROM mic_requests WHERE student_user_id = %s", (variant,))
                         mics = cursor.fetchall()
@@ -442,7 +426,6 @@ def check_user_id():
                     except Exception as e:
                         results[f"DB_{i}_mic_requests_error"] = str(e)
 
-                    # 4. class_teachers - مع حماية ضد العمود المفقود
                     try:
                         cursor.execute("SELECT teacher_user_id, class_id, school_id FROM class_teachers WHERE teacher_user_id = %s", (variant,))
                         teachers = cursor.fetchall()
@@ -1039,6 +1022,9 @@ def update_class_password():
     finally:
         if connection: connection.close()
 
+# ============================================================
+# 🆕 register_teachers - النسخة النهائية (بدون ON CONFLICT)
+# ============================================================
 @app.route('/register_teachers', methods=['POST'])
 def register_teachers():
     school_id = request.values.get('school_id')
@@ -1046,21 +1032,27 @@ def register_teachers():
     teacher_ids = request.values.get('teacher_ids', '')
     if not school_id or not class_id or not teacher_ids:
         return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
+    
     connection = get_db_connection(school_id)
     if not connection:
         return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    
     try:
         ids_list = [tid.strip() for tid in teacher_ids.split(",") if tid.strip()]
         if not ids_list:
             return jsonify({"status": "error", "message": "لا توجد IDs صالحة"}), 400
+        
         with connection.cursor() as cursor:
             create_tables_if_not_exist(cursor)
             added_count = 0
             invalid_ids = []
+            failed_inserts = []
+            
             for raw_tid in ids_list:
                 tid = raw_tid
                 found_id = None
 
+                # البحث في student_profiles
                 cursor.execute("SELECT user_id FROM student_profiles WHERE user_id = %s LIMIT 1", (tid,))
                 r = cursor.fetchone()
                 if r:
@@ -1080,6 +1072,7 @@ def register_teachers():
                     if r:
                         found_id = r['user_id']
 
+                # البحث في class_presence
                 if not found_id:
                     cursor.execute("SELECT user_id FROM class_presence WHERE user_id = %s AND class_id = %s LIMIT 1", (tid, int(class_id)))
                     r = cursor.fetchone()
@@ -1098,20 +1091,9 @@ def register_teachers():
                     if r:
                         found_id = r['user_id']
 
+                # البحث في mic_requests
                 if not found_id:
                     cursor.execute("SELECT student_user_id FROM mic_requests WHERE student_user_id = %s LIMIT 1", (tid,))
-                    r = cursor.fetchone()
-                    if r:
-                        found_id = r['student_user_id']
-                if not found_id and not tid.startswith("STU-"):
-                    alt = f"STU-{tid}"
-                    cursor.execute("SELECT student_user_id FROM mic_requests WHERE student_user_id = %s LIMIT 1", (alt,))
-                    r = cursor.fetchone()
-                    if r:
-                        found_id = r['student_user_id']
-                if not found_id and tid.startswith("STU-"):
-                    alt = tid.replace("STU-", "")
-                    cursor.execute("SELECT student_user_id FROM mic_requests WHERE student_user_id = %s LIMIT 1", (alt,))
                     r = cursor.fetchone()
                     if r:
                         found_id = r['student_user_id']
@@ -1120,22 +1102,62 @@ def register_teachers():
                     invalid_ids.append(tid)
                     continue
 
-                cursor.execute("""
-                    INSERT INTO class_teachers (teacher_user_id, class_id, school_id)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (teacher_user_id, class_id) DO NOTHING
-                """, (found_id, int(class_id), school_id))
-                added_count += 1
+                # الحل الجديد: لا نستخدم ON CONFLICT
+                try:
+                    cursor.execute(
+                        "SELECT id FROM class_teachers WHERE teacher_user_id = %s AND class_id = %s",
+                        (found_id, int(class_id))
+                    )
+                    existing = cursor.fetchone()
+                    
+                    if existing:
+                        continue
+                    
+                    cursor.execute("""
+                        INSERT INTO class_teachers (teacher_user_id, class_id, school_id)
+                        VALUES (%s, %s, %s)
+                    """, (found_id, int(class_id), school_id))
+                    added_count += 1
+                    
+                except Exception as insert_err:
+                    failed_inserts.append({
+                        "teacher_id": found_id,
+                        "error": str(insert_err)
+                    })
+                    continue
 
             connection.commit()
+            
+            if failed_inserts and added_count == 0:
+                return jsonify({
+                    "status": "error",
+                    "message": "فشل إدخال المعلمين",
+                    "errors": failed_inserts
+                }), 500
+            
             if added_count == 0 and invalid_ids:
-                return jsonify({"status": "error", "message": f"لم يتم العثور على المستخدمين: {', '.join(invalid_ids)}"}), 404
+                return jsonify({
+                    "status": "error",
+                    "message": f"لم يتم العثور على المستخدمين: {', '.join(invalid_ids)}"
+                }), 404
+            
+            if added_count == 0 and not invalid_ids:
+                return jsonify({
+                    "status": "success",
+                    "message": "المعلمون مسجلون مسبقاً"
+                }), 200
+            
             msg = f"تم تسجيل {added_count} معلم بنجاح"
             if invalid_ids:
                 msg += f" | لم يتم العثور على: {', '.join(invalid_ids)}"
             return jsonify({"status": "success", "message": msg}), 200
+            
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        try:
+            connection.rollback()
+        except:
+            pass
+        return jsonify({"status": "error", "message": f"خطأ: {str(e)}"}), 500
     finally:
         if connection: connection.close()
 
