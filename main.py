@@ -1,6 +1,7 @@
 import os
 import secrets
 import string
+import time
 import psycopg2
 import requests
 import base64
@@ -9,6 +10,7 @@ from psycopg2.extras import RealDictCursor
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
+from livekit import api
 
 load_dotenv()
 app = Flask(__name__)
@@ -17,6 +19,11 @@ app.json.ensure_ascii = False
 
 ADMIN_SECRET_PASSWORD = "2573486195715653N"
 cached_schools = []
+
+# 🆕 مفاتيح LiveKit
+LIVEKIT_API_KEY = "APIbmfvPM9vQA4s"
+LIVEKIT_API_SECRET = "8p7SAFQiWjhr5YN86h4fnuwILLcMAZ1fkgYn4ri4rvE"
+LIVEKIT_URL = "wss://distancelearning-mlptg6d9.livekit.cloud"
 
 def get_db_index(school_id):
     if not school_id or not str(school_id)[0].isdigit():
@@ -61,7 +68,6 @@ def create_tables_if_not_exist(cursor):
     cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS admin_password VARCHAR(255) DEFAULT '123456';")
     cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS is_closed SMALLINT DEFAULT 0;")
     cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS close_password VARCHAR(255) DEFAULT '1234';")
-    # 🆕 عمود كلمة سر رئيس الفصل
     cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS leader_password VARCHAR(255) DEFAULT '123456';")
 
     cursor.execute("""
@@ -188,6 +194,48 @@ def refresh_cache():
 
 init_all_databases()
 refresh_cache()
+
+# ============================================================
+# 🆕 توليد توكن LiveKit
+# ============================================================
+@app.route('/get_livekit_token', methods=['POST'])
+def get_livekit_token():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+    user_id = request.values.get('user_id')
+    user_name = request.values.get('user_name', 'User')
+
+    if not school_id or not class_id or not user_id:
+        return jsonify({"status": "error", "message": "بيانات ناقصة"}), 400
+
+    room_name = f"class_{school_id}_{class_id}"
+
+    try:
+        token = api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET) \
+            .with_identity(user_id) \
+            .with_name(user_name) \
+            .with_grants(api.VideoGrants(
+                room_join=True,
+                room=room_name,
+                can_publish=True,
+                can_subscribe=True,
+            )) \
+            .with_ttl(3600) \
+            .to_jwt()
+
+        return jsonify({
+            "status": "success",
+            "token": token,
+            "room": room_name,
+            "server_url": LIVEKIT_URL
+        }), 200
+    except Exception as e:
+        print(f"❌ LiveKit Token Error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ============================================================
+# باقي الـ Endpoints (كما هي بدون تغيير)
+# ============================================================
 
 @app.route('/save_user_profile', methods=['POST'])
 def save_user_profile():
@@ -929,7 +977,6 @@ def respond_mic_request():
     finally:
         if connection: connection.close()
 
-# 🆕 التحقق من سر رئيس الفصل
 @app.route('/verify_leader_password', methods=['POST'])
 def verify_leader_password():
     school_id = request.values.get('school_id')
@@ -951,7 +998,6 @@ def verify_leader_password():
     finally:
         if connection: connection.close()
 
-# 🆕 تحديث سر رئيس الفصل
 @app.route('/update_leader_password', methods=['POST'])
 def update_leader_password():
     school_id = request.values.get('school_id')
