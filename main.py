@@ -52,7 +52,11 @@ def get_db_connection(school_id=None):
         print(f"❌ Error connecting to DB_{db_index}: {e}")
         return None
 
+# ============================================================
+# ✅ إنشاء الجداول + إصلاح الأعمدة الناقصة تلقائياً
+# ============================================================
 def create_tables_if_not_exist(cursor):
+    # جدول المدارس
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS schools (
             id SERIAL PRIMARY KEY,
@@ -71,6 +75,7 @@ def create_tables_if_not_exist(cursor):
     cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS close_password VARCHAR(255) DEFAULT '1234';")
     cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS leader_password VARCHAR(255) DEFAULT '123456';")
 
+    # صور المدارس
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS school_images (
             school_id INT PRIMARY KEY REFERENCES schools(id) ON DELETE CASCADE,
@@ -78,6 +83,8 @@ def create_tables_if_not_exist(cursor):
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # مفاتيح الإدارة
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS admin_keys (
             id SERIAL PRIMARY KEY,
@@ -86,6 +93,8 @@ def create_tables_if_not_exist(cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # الفصول
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS classes (
             id SERIAL PRIMARY KEY,
@@ -96,6 +105,8 @@ def create_tables_if_not_exist(cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # الزوار
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS visitors (
             id SERIAL PRIMARY KEY,
@@ -105,6 +116,8 @@ def create_tables_if_not_exist(cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # ملفات الطلاب
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS student_profiles (
             id SERIAL PRIMARY KEY,
@@ -118,17 +131,37 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
+    # 🆕 جدول المعلمين مع إصلاح تلقائي للأعمدة الناقصة
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS class_teachers (
             id SERIAL PRIMARY KEY,
-            teacher_user_id VARCHAR(50) NOT NULL,
             class_id INT NOT NULL,
             school_id VARCHAR(6) NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(teacher_user_id, class_id)
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # إضافة العمود إن لم يكن موجوداً
+    cursor.execute("ALTER TABLE class_teachers ADD COLUMN IF NOT EXISTS teacher_user_id VARCHAR(50);")
+    # إضافة القيد الفريد إن لم يكن موجوداً
+    cursor.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint 
+                WHERE conname = 'class_teachers_teacher_user_id_class_id_key'
+            ) THEN
+                BEGIN
+                    ALTER TABLE class_teachers 
+                    ADD CONSTRAINT class_teachers_teacher_user_id_class_id_key 
+                    UNIQUE (teacher_user_id, class_id);
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END;
+            END IF;
+        END $$;
+    """)
 
+    # الحضور في الفصول
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS class_presence (
             id SERIAL PRIMARY KEY,
@@ -141,6 +174,7 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
+    # طلبات المايك
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mic_requests (
             id SERIAL PRIMARY KEY,
@@ -163,8 +197,8 @@ def init_all_databases():
                 with conn.cursor() as cursor:
                     create_tables_if_not_exist(cursor)
                     conn.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"❌ Init error DB_{i}: {e}")
             finally:
                 conn.close()
 
@@ -235,15 +269,59 @@ def get_livekit_token():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ============================================================
-# 🆕 Endpoint لفحص وجود user_id في قاعدة البيانات (جديد!)
+# 🆕 Endpoint إصلاح كل الجداول في كل قواعد البيانات
+# ⚠️ احذفه بعد الاستخدام مرة واحدة
+# ============================================================
+@app.route('/fix_all_tables', methods=['POST'])
+def fix_all_tables():
+    """
+    إصلاح كل الجداول في قواعد البيانات الخمس
+    الاستخدام: curl -X POST "https://your-server.com/fix_all_tables" -d "secret=2573486195715653N"
+    """
+    secret = request.values.get('secret')
+    if secret != ADMIN_SECRET_PASSWORD:
+        return jsonify({"status": "error", "message": "غير مصرح"}), 401
+    
+    results = []
+    for i in range(5):
+        conn = get_db_connection(str(i * 2))
+        if not conn:
+            results.append({"db_index": i, "status": "skipped", "reason": "no connection"})
+            continue
+        try:
+            with conn.cursor() as cursor:
+                # تنفيذ create_tables_if_not_exist التي تحتوي الآن على ALTER TABLE
+                create_tables_if_not_exist(cursor)
+                conn.commit()
+                
+                # التحقق من وجود العمود
+                cursor.execute("""
+                    SELECT column_name FROM information_schema.columns 
+                    WHERE table_name = 'class_teachers' AND column_name = 'teacher_user_id'
+                """)
+                has_col = cursor.fetchone() is not None
+                
+                results.append({
+                    "db_index": i,
+                    "status": "success",
+                    "teacher_user_id_exists": has_col
+                })
+        except Exception as e:
+            results.append({"db_index": i, "status": "error", "error": str(e)})
+        finally:
+            conn.close()
+    
+    return jsonify({
+        "status": "success",
+        "message": "تم إصلاح جميع الجداول",
+        "results": results
+    }), 200
+
+# ============================================================
+# 🆕 Endpoint لفحص وجود user_id في قاعدة البيانات
 # ============================================================
 @app.route('/check_user_id', methods=['POST', 'GET'])
 def check_user_id():
-    """
-    فحص وجود user_id في كل قواعد البيانات
-    الاستخدام: curl -X POST "https://your-server.com/check_user_id" -d "user_id=STU-037708"
-    أو من المتصفح: /check_user_id?user_id=STU-037708
-    """
     user_id = request.values.get('user_id')
     if not user_id:
         return jsonify({"status": "error", "message": "الرجاء إرسال user_id"}), 400
@@ -263,45 +341,57 @@ def check_user_id():
             with conn.cursor() as cursor:
                 for variant in variants:
                     # 1. student_profiles
-                    cursor.execute("SELECT device_id, user_id, full_name, age, school_name, image_url, updated_at FROM student_profiles WHERE user_id = %s", (variant,))
-                    profile = cursor.fetchone()
-                    if profile:
-                        results[f"DB_{i}_student_profiles_{variant}"] = {
-                            "device_id": profile['device_id'],
-                            "user_id": profile['user_id'],
-                            "full_name": profile['full_name'],
-                            "age": profile['age'],
-                            "school_name": profile['school_name'],
-                            "image_url": profile['image_url'],
-                            "updated_at": profile['updated_at'].isoformat() if profile['updated_at'] else None
-                        }
+                    try:
+                        cursor.execute("SELECT device_id, user_id, full_name, age, school_name, image_url, updated_at FROM student_profiles WHERE user_id = %s", (variant,))
+                        profile = cursor.fetchone()
+                        if profile:
+                            results[f"DB_{i}_student_profiles_{variant}"] = {
+                                "device_id": profile['device_id'],
+                                "user_id": profile['user_id'],
+                                "full_name": profile['full_name'],
+                                "age": profile['age'],
+                                "school_name": profile['school_name'],
+                                "image_url": profile['image_url'],
+                                "updated_at": profile['updated_at'].isoformat() if profile['updated_at'] else None
+                            }
+                    except Exception as e:
+                        results[f"DB_{i}_student_profiles_error"] = str(e)
 
                     # 2. class_presence
-                    cursor.execute("SELECT school_id, class_id, device_id, user_id, last_seen FROM class_presence WHERE user_id = %s", (variant,))
-                    presences = cursor.fetchall()
-                    if presences:
-                        results[f"DB_{i}_class_presence_{variant}"] = [
-                            {"school_id": p['school_id'], "class_id": p['class_id'], "device_id": p['device_id'], "last_seen": p['last_seen'].isoformat() if p['last_seen'] else None}
-                            for p in presences
-                        ]
+                    try:
+                        cursor.execute("SELECT school_id, class_id, device_id, user_id, last_seen FROM class_presence WHERE user_id = %s", (variant,))
+                        presences = cursor.fetchall()
+                        if presences:
+                            results[f"DB_{i}_class_presence_{variant}"] = [
+                                {"school_id": p['school_id'], "class_id": p['class_id'], "device_id": p['device_id'], "last_seen": p['last_seen'].isoformat() if p['last_seen'] else None}
+                                for p in presences
+                            ]
+                    except Exception as e:
+                        results[f"DB_{i}_class_presence_error"] = str(e)
 
                     # 3. mic_requests
-                    cursor.execute("SELECT id, school_id, class_id, student_name FROM mic_requests WHERE student_user_id = %s", (variant,))
-                    mics = cursor.fetchall()
-                    if mics:
-                        results[f"DB_{i}_mic_requests_{variant}"] = [
-                            {"id": m['id'], "school_id": m['school_id'], "class_id": m['class_id'], "student_name": m['student_name']}
-                            for m in mics
-                        ]
+                    try:
+                        cursor.execute("SELECT id, school_id, class_id, student_name FROM mic_requests WHERE student_user_id = %s", (variant,))
+                        mics = cursor.fetchall()
+                        if mics:
+                            results[f"DB_{i}_mic_requests_{variant}"] = [
+                                {"id": m['id'], "school_id": m['school_id'], "class_id": m['class_id'], "student_name": m['student_name']}
+                                for m in mics
+                            ]
+                    except Exception as e:
+                        results[f"DB_{i}_mic_requests_error"] = str(e)
 
-                    # 4. class_teachers
-                    cursor.execute("SELECT teacher_user_id, class_id, school_id FROM class_teachers WHERE teacher_user_id = %s", (variant,))
-                    teachers = cursor.fetchall()
-                    if teachers:
-                        results[f"DB_{i}_class_teachers_{variant}"] = [
-                            {"teacher_user_id": t['teacher_user_id'], "class_id": t['class_id'], "school_id": t['school_id']}
-                            for t in teachers
-                        ]
+                    # 4. class_teachers - مع حماية ضد العمود المفقود
+                    try:
+                        cursor.execute("SELECT teacher_user_id, class_id, school_id FROM class_teachers WHERE teacher_user_id = %s", (variant,))
+                        teachers = cursor.fetchall()
+                        if teachers:
+                            results[f"DB_{i}_class_teachers_{variant}"] = [
+                                {"teacher_user_id": t['teacher_user_id'], "class_id": t['class_id'], "school_id": t['school_id']}
+                                for t in teachers
+                            ]
+                    except Exception as e:
+                        results[f"DB_{i}_class_teachers_error"] = str(e)
         except Exception as e:
             results[f"DB_{i}_error"] = str(e)
         finally:
@@ -312,7 +402,19 @@ def check_user_id():
             "status": "not_found",
             "message": f"❌ الـ ID '{user_id}' غير موجود في أي جدول بأي قاعدة بيانات",
             "searched_variants": variants
-        }), 200  # ← نعيد 200 بدلاً من 404 لعرض البيانات بشكل أفضل
+        }), 200
+
+    # التحقق من وجود أخطاء
+    has_errors = any("error" in key.lower() for key in results.keys())
+    has_data = any("student_profiles" in key or "class_presence" in key or "class_teachers" in key for key in results.keys())
+
+    if has_errors and not has_data:
+        return jsonify({
+            "status": "error",
+            "message": "❌ وُجدت أخطاء في قاعدة البيانات",
+            "errors": {k: v for k, v in results.items() if "error" in k.lower()},
+            "hint": "قم بتنفيذ /fix_all_tables أولاً"
+        }), 200
 
     return jsonify({
         "status": "found",
@@ -323,13 +425,10 @@ def check_user_id():
     }), 200
 
 # ============================================================
-# 🆕 Endpoint مؤقت لترحيل البيانات القديمة (احذفه بعد الاستخدام مرة واحدة)
+# 🆕 Endpoint مؤقت لترحيل البيانات القديمة
 # ============================================================
 @app.route('/migrate_user_ids', methods=['POST'])
 def migrate_user_ids():
-    """
-    ⚠️ استخدم هذا الـ endpoint مرة واحدة فقط لترحيل البيانات القديمة
-    """
     secret = request.values.get('secret')
     if secret != ADMIN_SECRET_PASSWORD:
         return jsonify({"status": "error", "message": "غير مصرح"}), 401
@@ -368,14 +467,17 @@ def migrate_user_ids():
                 """)
                 cnt3 = cursor.rowcount
 
-                cursor.execute("""
-                    UPDATE class_teachers 
-                    SET teacher_user_id = 'STU-' || teacher_user_id 
-                    WHERE teacher_user_id IS NOT NULL 
-                      AND teacher_user_id NOT LIKE 'STU-%' 
-                      AND LENGTH(teacher_user_id) = 6
-                """)
-                cnt4 = cursor.rowcount
+                try:
+                    cursor.execute("""
+                        UPDATE class_teachers 
+                        SET teacher_user_id = 'STU-' || teacher_user_id 
+                        WHERE teacher_user_id IS NOT NULL 
+                          AND teacher_user_id NOT LIKE 'STU-%' 
+                          AND LENGTH(teacher_user_id) = 6
+                    """)
+                    cnt4 = cursor.rowcount
+                except Exception:
+                    cnt4 = 0
 
                 conn.commit()
                 results.append({
@@ -392,12 +494,8 @@ def migrate_user_ids():
     
     return jsonify({"status": "success", "results": results}), 200
 
-# ============================================================
-# 🆕 Endpoint إضافي: فحص بـ device_id (مفيد للتشخيص)
-# ============================================================
 @app.route('/check_device_id', methods=['POST', 'GET'])
 def check_device_id():
-    """فحص وجود device_id في قاعدة البيانات"""
     device_id = request.values.get('device_id')
     if not device_id:
         return jsonify({"status": "error", "message": "الرجاء إرسال device_id"}), 400
@@ -433,7 +531,7 @@ def check_device_id():
         if connection: connection.close()
 
 # ============================================================
-# باقي الـ Endpoints (كما هي)
+# باقي الـ Endpoints
 # ============================================================
 
 @app.route('/save_user_profile', methods=['POST'])
@@ -881,9 +979,6 @@ def update_class_password():
     finally:
         if connection: connection.close()
 
-# ============================================================
-# 🆕 register_teachers المحدثة - تدعم STU-XXXXXX والقديم XXXXXX
-# ============================================================
 @app.route('/register_teachers', methods=['POST'])
 def register_teachers():
     school_id = request.values.get('school_id')
