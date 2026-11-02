@@ -109,7 +109,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # 🆕 جدول المعلمين
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS class_teachers (
             id SERIAL PRIMARY KEY,
@@ -121,7 +120,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # 🆕 جدول حضور الطلاب
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS class_presence (
             id SERIAL PRIMARY KEY,
@@ -131,6 +129,21 @@ def create_tables_if_not_exist(cursor):
             user_id VARCHAR(50),
             last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(device_id, class_id)
+        )
+    """)
+
+    # 🆕 جدول طلبات المايك
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS mic_requests (
+            id SERIAL PRIMARY KEY,
+            school_id VARCHAR(6) NOT NULL,
+            class_id INT NOT NULL,
+            student_device_id VARCHAR(255) NOT NULL,
+            student_user_id VARCHAR(50),
+            student_name VARCHAR(255),
+            student_image TEXT,
+            status VARCHAR(50) DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -620,7 +633,6 @@ def update_class_password():
     finally:
         if connection: connection.close()
 
-# 🆕 تسجيل معلمين
 @app.route('/register_teachers', methods=['POST'])
 def register_teachers():
     school_id = request.values.get('school_id')
@@ -663,7 +675,6 @@ def register_teachers():
     finally:
         if connection: connection.close()
 
-# 🆕 جلب المعلمين المتصلين بالفصل
 @app.route('/get_connected_teachers', methods=['POST'])
 def get_connected_teachers():
     school_id = request.values.get('school_id')
@@ -702,7 +713,6 @@ def get_connected_teachers():
     finally:
         if connection: connection.close()
 
-# 🆕 انضمام الطالب للفصل
 @app.route('/join_class', methods=['POST'])
 def join_class():
     school_id = request.values.get('school_id')
@@ -736,7 +746,6 @@ def join_class():
     finally:
         if connection: connection.close()
 
-# 🆕 جلب الطلاب الحاضرين
 @app.route('/get_class_presence', methods=['POST'])
 def get_class_presence():
     school_id = request.values.get('school_id')
@@ -779,7 +788,6 @@ def get_class_presence():
     finally:
         if connection: connection.close()
 
-# 🆕 نبضة الحضور
 @app.route('/heartbeat_class', methods=['POST'])
 def heartbeat_class():
     school_id = request.values.get('school_id')
@@ -803,7 +811,6 @@ def heartbeat_class():
     finally:
         if connection: connection.close()
 
-# 🆕 خروج من الفصل
 @app.route('/leave_class', methods=['POST'])
 def leave_class():
     school_id = request.values.get('school_id')
@@ -822,6 +829,105 @@ def leave_class():
             """, (school_id, int(class_id), device_id))
             connection.commit()
             return jsonify({"status": "success"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+# 🆕 طلب المايك من الطالب
+@app.route('/request_mic', methods=['POST'])
+def request_mic():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+    device_id = request.values.get('device_id')
+    user_id = request.values.get('user_id', '')
+    if not school_id or not class_id or not device_id:
+        return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            # جلب بيانات الطالب
+            cursor.execute(
+                "SELECT full_name, image_url FROM student_profiles WHERE device_id = %s",
+                (device_id,)
+            )
+            student = cursor.fetchone()
+            full_name = student['full_name'] if student else "طالب"
+            image_url = student['image_url'] if student else ""
+            # منع التكرار: إذا كان لديه طلب pending، لا نضيف آخر
+            cursor.execute("""
+                SELECT id FROM mic_requests
+                WHERE student_device_id = %s AND class_id = %s AND status = 'pending'
+            """, (device_id, int(class_id)))
+            existing = cursor.fetchone()
+            if existing:
+                return jsonify({"status": "success", "message": "لديك طلب قائم بالفعل"}), 200
+            cursor.execute("""
+                INSERT INTO mic_requests (school_id, class_id, student_device_id, student_user_id, student_name, student_image, status)
+                VALUES (%s, %s, %s, %s, %s, %s, 'pending')
+            """, (school_id, int(class_id), device_id, user_id, full_name, image_url))
+            connection.commit()
+            return jsonify({"status": "success", "message": "تم إرسال طلب المايك"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
+
+# 🆕 جلب طلبات المايك للمعلم
+@app.route('/get_mic_requests', methods=['POST'])
+def get_mic_requests():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+    if not school_id or not class_id:
+        return jsonify({"status": "error", "requests": []}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "requests": []}), 500
+    try:
+        with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
+            cursor.execute("""
+                SELECT id, student_device_id, student_user_id, student_name, student_image, status, created_at
+                FROM mic_requests
+                WHERE school_id = %s AND class_id = %s AND status = 'pending'
+                ORDER BY created_at ASC
+            """, (school_id, int(class_id)))
+            rows = cursor.fetchall()
+            requests_list = []
+            for r in rows:
+                requests_list.append({
+                    "id": r['id'],
+                    "device_id": r['student_device_id'],
+                    "user_id": r['student_user_id'] or "",
+                    "name": r['student_name'] or "طالب",
+                    "image_url": r['student_image'] or "",
+                })
+            return jsonify({"status": "success", "requests": requests_list}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e), "requests": []}), 500
+    finally:
+        if connection: connection.close()
+
+# 🆕 الموافقة أو الرفض على طلب المايك
+@app.route('/respond_mic_request', methods=['POST'])
+def respond_mic_request():
+    school_id = request.values.get('school_id')
+    request_id = request.values.get('request_id')
+    action = request.values.get('action')  # 'approve' أو 'reject'
+    if not school_id or not request_id or action not in ['approve', 'reject']:
+        return jsonify({"status": "error", "message": "بيانات غير مكتملة"}), 400
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال"}), 500
+    try:
+        with connection.cursor() as cursor:
+            new_status = 'approved' if action == 'approve' else 'rejected'
+            cursor.execute("UPDATE mic_requests SET status = %s WHERE id = %s", (new_status, int(request_id)))
+            connection.commit()
+            return jsonify({"status": "success", "message": "تمت العملية"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
