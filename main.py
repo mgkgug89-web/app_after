@@ -157,7 +157,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-    # 🆕 جدول mic_requests مع request_type
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mic_requests (
             id SERIAL PRIMARY KEY,
@@ -177,7 +176,6 @@ def create_tables_if_not_exist(cursor):
     except Exception:
         pass
 
-    # 🆕 جدول صلاحيات الطالب (بعد موافقة المعلم)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS class_permissions (
             id SERIAL PRIMARY KEY,
@@ -245,21 +243,6 @@ refresh_cache()
 
 
 # ============================================================
-# 🆕 LiveKit Room Service
-# ============================================================
-def get_livekit_room_service():
-    try:
-        return api.RoomServiceClient(
-            LIVEKIT_URL.replace("wss://", "https://"),
-            LIVEKIT_API_KEY,
-            LIVEKIT_API_SECRET,
-        )
-    except Exception as e:
-        print(f"❌ LiveKit Room Service Error: {e}")
-        return None
-
-
-# ============================================================
 # 🆕 توليد توكن LiveKit
 # ============================================================
 @app.route('/get_livekit_token', methods=['POST'])
@@ -299,72 +282,6 @@ def get_livekit_token():
         }), 200
     except Exception as e:
         print(f"❌ LiveKit Token Error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-# ============================================================
-# 🆕 جلب معلومات الغرفة
-# ============================================================
-@app.route('/get_room_info', methods=['POST', 'GET'])
-def get_room_info():
-    school_id = request.values.get('school_id')
-    class_id = request.values.get('class_id')
-    if not school_id or not class_id:
-        return jsonify({"status": "error", "message": "بيانات ناقصة"}), 400
-    room_name = f"class_{school_id}_{class_id}"
-    try:
-        client = get_livekit_room_service()
-        if not client:
-            return jsonify({"status": "error", "message": "LiveKit RoomService غير متاح"}), 500
-        try:
-            participants = client.list_participants(room=room_name)
-            participants_list = []
-            for p in participants:
-                participants_list.append({
-                    "identity": p.identity,
-                    "name": p.name,
-                    "state": str(p.state),
-                    "joined_at": p.joined_at,
-                })
-            return jsonify({
-                "status": "success",
-                "room": room_name,
-                "participants": participants_list,
-                "count": len(participants_list),
-            }), 200
-        except Exception as e:
-            return jsonify({
-                "status": "success",
-                "room": room_name,
-                "participants": [],
-                "count": 0,
-                "note": f"الغرفة فارغة: {str(e)}"
-            }), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-# ============================================================
-# 🆕 إزالة مشارك
-# ============================================================
-@app.route('/remove_participant', methods=['POST'])
-def remove_participant():
-    school_id = request.values.get('school_id')
-    class_id = request.values.get('class_id')
-    user_id = request.values.get('user_id')
-    if not school_id or not class_id or not user_id:
-        return jsonify({"status": "error", "message": "بيانات ناقصة"}), 400
-    room_name = f"class_{school_id}_{class_id}"
-    try:
-        client = get_livekit_room_service()
-        if not client:
-            return jsonify({"status": "error", "message": "LiveKit RoomService غير متاح"}), 500
-        try:
-            client.remove_participant(room=room_name, identity=user_id)
-            return jsonify({"status": "success", "message": f"تم إزالة {user_id}"}), 200
-        except Exception as e:
-            return jsonify({"status": "error", "message": f"لم يتم العثور على المشارك: {str(e)}"}), 404
-    except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -1621,16 +1538,7 @@ def kick_user():
             except Exception:
                 pass
             connection.commit()
-        livekit_removed = False
-        try:
-            client = get_livekit_room_service()
-            if client:
-                room_name = f"class_{school_id}_{class_id}"
-                client.remove_participant(room=room_name, identity=user_id)
-                livekit_removed = True
-        except Exception as e:
-            print(f"⚠️ LiveKit remove warning: {e}")
-        return jsonify({"status": "success", "message": "تم الطرد بنجاح", "livekit_removed": livekit_removed}), 200
+        return jsonify({"status": "success", "message": "تم الطرد بنجاح"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
