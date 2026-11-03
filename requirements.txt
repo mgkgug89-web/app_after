@@ -4,4 +4,7 @@ psycopg2-binary
 gunicorn
 python-dotenv
 requests
-livekit-api
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
