@@ -51,6 +51,9 @@ def get_db_connection(school_id=None):
         print(f"❌ Error connecting to DB_{db_index}: {e}")
         return None
 
+# ============================================================
+# ✅ إنشاء الجداول + إصلاح الأعمدة الناقصة تلقائياً (يحافظ على بياناتك كاملة)
+# ============================================================
 def create_tables_if_not_exist(cursor):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS schools (
@@ -65,6 +68,12 @@ def create_tables_if_not_exist(cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS admin_device_id VARCHAR(255);")
+    cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS admin_password VARCHAR(255) DEFAULT '123456';")
+    cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS is_closed SMALLINT DEFAULT 0;")
+    cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS close_password VARCHAR(255) DEFAULT '1234';")
+    cursor.execute("ALTER TABLE schools ADD COLUMN IF NOT EXISTS leader_password VARCHAR(255) DEFAULT '123456';")
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS school_images (
             school_id INT PRIMARY KEY REFERENCES schools(id) ON DELETE CASCADE,
@@ -72,6 +81,16 @@ def create_tables_if_not_exist(cursor):
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS admin_keys (
+            id SERIAL PRIMARY KEY,
+            key_value VARCHAR(20) NOT NULL UNIQUE,
+            is_used SMALLINT DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS classes (
             id SERIAL PRIMARY KEY,
@@ -83,6 +102,18 @@ def create_tables_if_not_exist(cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cursor.execute("ALTER TABLE classes ADD COLUMN IF NOT EXISTS google_meet_link TEXT;")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS visitors (
+            id SERIAL PRIMARY KEY,
+            school_id VARCHAR(6) NOT NULL,
+            visitor_device_id VARCHAR(255) NOT NULL,
+            status VARCHAR(50) DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS student_profiles (
             id SERIAL PRIMARY KEY,
@@ -95,6 +126,7 @@ def create_tables_if_not_exist(cursor):
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS class_teachers (
             id SERIAL PRIMARY KEY,
@@ -104,6 +136,11 @@ def create_tables_if_not_exist(cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    try:
+        cursor.execute("ALTER TABLE class_teachers ADD COLUMN IF NOT EXISTS teacher_user_id VARCHAR(50);")
+    except Exception:
+        pass
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS class_presence (
             id SERIAL PRIMARY KEY,
@@ -115,6 +152,7 @@ def create_tables_if_not_exist(cursor):
             UNIQUE(device_id, class_id)
         )
     """)
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mic_requests (
             id SERIAL PRIMARY KEY,
@@ -129,6 +167,11 @@ def create_tables_if_not_exist(cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    try:
+        cursor.execute("ALTER TABLE mic_requests ADD COLUMN IF NOT EXISTS request_type VARCHAR(20) DEFAULT 'mic';")
+    except Exception:
+        pass
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS class_permissions (
             id SERIAL PRIMARY KEY,
@@ -152,13 +195,47 @@ def init_all_databases():
                     conn.commit()
             except Exception as e:
                 print(f"❌ Init error DB_{i}: {e}")
+                try:
+                    conn.rollback()
+                except:
+                    pass
             finally:
                 conn.close()
 
+def refresh_cache():
+    global cached_schools
+    all_schools = []
+    for i in range(5):
+        connection = get_db_connection(str(i * 2))
+        if not connection:
+            continue
+        try:
+            with connection.cursor() as cursor:
+                create_tables_if_not_exist(cursor)
+                cursor.execute("""
+                    SELECT s.school_id, s.school_name, s.admin_device_id, s.admin_password, COALESCE(s.is_closed, 0) as is_closed, si.image_url,
+                    (SELECT COUNT(*) FROM classes c WHERE c.school_id = s.school_id) as classes_count
+                    FROM schools s 
+                    LEFT JOIN school_images si ON s.id = si.school_id 
+                    ORDER BY s.id DESC
+                """)
+                all_schools.extend(cursor.fetchall())
+                connection.commit()
+        except Exception:
+            try:
+                connection.rollback()
+            except:
+                pass
+        finally:
+            if connection: connection.close()
+    all_schools.sort(key=lambda x: x['school_id'], reverse=True)
+    cached_schools = all_schools
+
 init_all_databases()
+refresh_cache()
 
 # ========================================================
-# 🚀 API إنشاء رابط Google Meet خاص بالفصل عبر Google API
+# 🚀 API إنشاء رابط Google Meet خاص بالفصل
 # ========================================================
 @app.route('/generate_google_meet', methods=['POST'])
 def generate_google_meet():
@@ -174,13 +251,12 @@ def generate_google_meet():
 
     try:
         with connection.cursor() as cursor:
-            # التحقق مما إذا كان هناك رابط أنشئ سابقاً
+            create_tables_if_not_exist(cursor)
             cursor.execute("SELECT google_meet_link FROM classes WHERE school_id = %s AND id = %s", (school_id, int(class_id)))
             row = cursor.fetchone()
             if row and row.get('google_meet_link'):
                 return jsonify({"status": "success", "meet_link": row['google_meet_link']}), 200
 
-            # في حال عدم وجود رابط، يتم توليد معرّف اجتماع Google Meet فريد وتخزينه
             unique_room = f"meet-school-{school_id}-class-{class_id}-" + ''.join(secrets.choice(string.ascii_lowercase) for _ in range(6))
             meet_link = f"https://meet.google.com/lookup/{unique_room}"
 
@@ -192,6 +268,9 @@ def generate_google_meet():
     finally:
         if connection: connection.close()
 
+# ============================================================
+# ✅ الملف الشخصي للطلاب
+# ============================================================
 @app.route('/save_user_profile', methods=['POST'])
 def save_user_profile():
     device_id = request.values.get('device_id')
@@ -250,6 +329,7 @@ def get_user_profile():
         return jsonify({"status": "error", "profile": None}), 500
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
             cursor.execute("SELECT device_id, user_id, full_name, age, school_name, image_url FROM student_profiles WHERE device_id = %s", (device_id,))
             profile = cursor.fetchone()
             return jsonify({"status": "success", "profile": profile}), 200
@@ -258,6 +338,9 @@ def get_user_profile():
     finally:
         if connection: connection.close()
 
+# ============================================================
+# ✅ المدارس والفصول
+# ============================================================
 @app.route('/verify', methods=['POST'])
 def verify_school():
     school_id = request.values.get('school_id')
@@ -266,6 +349,7 @@ def verify_school():
         return jsonify({"status": "error", "school_name": None}), 500
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
             cursor.execute("SELECT school_name, COALESCE(is_closed, 0) as is_closed FROM schools WHERE school_id = %s", (school_id,))
             result = cursor.fetchone()
             if result:
@@ -273,6 +357,11 @@ def verify_school():
             return jsonify({"status": "error", "school_name": None, "message": "الإيدي غير صحيح"}), 200
     finally:
         if connection: connection.close()
+
+@app.route('/get_schools', methods=['GET'])
+def get_schools():
+    refresh_cache()
+    return jsonify({"status": "success", "schools": cached_schools}), 200
 
 @app.route('/get_classes', methods=['POST'])
 def get_classes():
@@ -282,12 +371,16 @@ def get_classes():
         return jsonify({"status": "error", "classes": []}), 500
     try:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT id, school_id, class_name, class_password, image_url FROM classes WHERE school_id = %s ORDER BY id DESC", (school_id,))
+            create_tables_if_not_exist(cursor)
+            cursor.execute("SELECT id, school_id, class_name, class_password, image_url, google_meet_link FROM classes WHERE school_id = %s ORDER BY id DESC", (school_id,))
             classes = cursor.fetchall()
             return jsonify({"status": "success", "classes": classes}), 200
     finally:
         if connection: connection.close()
 
+# ============================================================
+# ✅ إدارة المعلمين والحضور والطلب
+# ============================================================
 @app.route('/register_teachers', methods=['POST'])
 def register_teachers():
     school_id = request.values.get('school_id')
@@ -326,6 +419,7 @@ def get_connected_teachers():
         return jsonify({"status": "error", "teachers": []}), 500
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
             cursor.execute("""
                 SELECT ct.teacher_user_id, sp.full_name, sp.image_url, sp.device_id
                 FROM class_teachers ct
@@ -350,6 +444,7 @@ def join_class():
         return jsonify({"status": "error"}), 500
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
             cursor.execute("""
                 INSERT INTO class_presence (school_id, class_id, device_id, user_id, last_seen)
                 VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
@@ -369,6 +464,7 @@ def get_class_presence():
         return jsonify({"status": "error", "students": []}), 500
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
             cursor.execute("""
                 SELECT cp.device_id, cp.user_id, sp.full_name, sp.image_url
                 FROM class_presence cp
@@ -425,6 +521,7 @@ def request_permission():
         return jsonify({"status": "error"}), 500
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
             cursor.execute("SELECT full_name, image_url FROM student_profiles WHERE device_id = %s", (device_id,))
             student = cursor.fetchone()
             name = student['full_name'] if student else "طالب"
@@ -445,6 +542,7 @@ def get_pending_permissions_for_teacher():
         return jsonify({"status": "error", "requests": []}), 500
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
             cursor.execute("SELECT id, student_device_id, student_user_id, student_name, student_image, request_type FROM mic_requests WHERE school_id = %s AND class_id = %s AND status = 'pending'", (school_id, int(class_id)))
             rows = cursor.fetchall()
             reqs = [{"id": r['id'], "device_id": r['student_device_id'], "user_id": r['student_user_id'], "name": r['student_name'], "image_url": r['student_image'], "request_type": r['request_type']} for r in rows]
@@ -462,6 +560,7 @@ def respond_mic_request():
         return jsonify({"status": "error"}), 500
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
             cursor.execute("SELECT * FROM mic_requests WHERE id = %s", (int(request_id),))
             req = cursor.fetchone()
             if req:
@@ -489,6 +588,7 @@ def get_my_permissions():
         return jsonify({"status": "error"}), 500
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
             cursor.execute("SELECT can_mic, can_video FROM class_permissions WHERE school_id = %s AND class_id = %s AND student_user_id = %s", (school_id, int(class_id), user_id))
             row = cursor.fetchone()
             if row:
@@ -507,6 +607,7 @@ def check_my_request_status():
         return jsonify({"status": "error"}), 500
     try:
         with connection.cursor() as cursor:
+            create_tables_if_not_exist(cursor)
             cursor.execute("SELECT request_type, status FROM mic_requests WHERE school_id = %s AND class_id = %s AND student_device_id = %s", (school_id, int(class_id), device_id))
             rows = cursor.fetchall()
             result = {r['request_type']: r['status'] for r in rows}
@@ -571,7 +672,7 @@ def kick_user():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"message": "Google Meet API Server is Running!"}), 200
+    return jsonify({"message": "Google Meet API Server is Running Successfully!"}), 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
