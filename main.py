@@ -602,7 +602,7 @@ def kick_user():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"message": "API is running smoothly without LiveKit!"}), 200
+    return jsonify({"message": "API is running smoothly with Jitsi audio/video support!"}), 200
 
 
 if __name__ == '__main__':
