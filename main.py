@@ -4,26 +4,32 @@ import string
 import psycopg2
 import requests
 import base64
+import datetime
 from psycopg2.extras import RealDictCursor
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
+
+# مكتبات Google API
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 
 load_dotenv()
 app = Flask(__name__)
 CORS(app)
 app.json.ensure_ascii = False
 
+# Google OAuth Client ID المرفق من قبلك
+GOOGLE_CLIENT_ID = "385192523664-upg5r98brliom7vedf058hfqkp9in4uc.apps.googleusercontent.com"
+
 ADMIN_SECRET_PASSWORD = "2573486195715653N"
 cached_schools = []
-
 
 def get_db_index(school_id):
     if not school_id or not str(school_id)[0].isdigit():
         return 0
     first_digit = int(str(school_id)[0])
     return first_digit // 2
-
 
 def get_db_connection(school_id=None):
     try:
@@ -44,7 +50,6 @@ def get_db_connection(school_id=None):
     except Exception as e:
         print(f"❌ Error connecting to DB_{db_index}: {e}")
         return None
-
 
 def create_tables_if_not_exist(cursor):
     cursor.execute("""
@@ -68,29 +73,13 @@ def create_tables_if_not_exist(cursor):
         )
     """)
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS admin_keys (
-            id SERIAL PRIMARY KEY,
-            key_value VARCHAR(20) NOT NULL UNIQUE,
-            is_used SMALLINT DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
         CREATE TABLE IF NOT EXISTS classes (
             id SERIAL PRIMARY KEY,
             school_id VARCHAR(6) NOT NULL,
             class_name VARCHAR(100) NOT NULL,
             class_password VARCHAR(100) NOT NULL,
             image_url TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS visitors (
-            id SERIAL PRIMARY KEY,
-            school_id VARCHAR(6) NOT NULL,
-            visitor_device_id VARCHAR(255) NOT NULL,
-            status VARCHAR(50) DEFAULT 'pending',
+            google_meet_link TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -153,7 +142,6 @@ def create_tables_if_not_exist(cursor):
         )
     """)
 
-
 def init_all_databases():
     for i in range(5):
         conn = get_db_connection(str(i * 2))
@@ -167,37 +155,42 @@ def init_all_databases():
             finally:
                 conn.close()
 
-
-def refresh_cache():
-    global cached_schools
-    all_schools = []
-    for i in range(5):
-        connection = get_db_connection(str(i * 2))
-        if not connection:
-            continue
-        try:
-            with connection.cursor() as cursor:
-                create_tables_if_not_exist(cursor)
-                cursor.execute("""
-                    SELECT s.school_id, s.school_name, s.admin_device_id, s.admin_password, COALESCE(s.is_closed, 0) as is_closed, si.image_url,
-                    (SELECT COUNT(*) FROM classes c WHERE c.school_id = s.school_id) as classes_count
-                    FROM schools s 
-                    LEFT JOIN school_images si ON s.id = si.school_id 
-                    ORDER BY s.id DESC
-                """)
-                all_schools.extend(cursor.fetchall())
-                connection.commit()
-        except Exception:
-            pass
-        finally:
-            if connection: connection.close()
-    all_schools.sort(key=lambda x: x['school_id'], reverse=True)
-    cached_schools = all_schools
-
-
 init_all_databases()
-refresh_cache()
 
+# ========================================================
+# 🚀 API إنشاء رابط Google Meet خاص بالفصل عبر Google API
+# ========================================================
+@app.route('/generate_google_meet', methods=['POST'])
+def generate_google_meet():
+    school_id = request.values.get('school_id')
+    class_id = request.values.get('class_id')
+    
+    if not school_id or not class_id:
+        return jsonify({"status": "error", "message": "بيانات الفصل غير مكتملة"}), 400
+        
+    connection = get_db_connection(school_id)
+    if not connection:
+        return jsonify({"status": "error", "message": "خطأ في الاتصال بقاعدة البيانات"}), 500
+
+    try:
+        with connection.cursor() as cursor:
+            # التحقق مما إذا كان هناك رابط أنشئ سابقاً
+            cursor.execute("SELECT google_meet_link FROM classes WHERE school_id = %s AND id = %s", (school_id, int(class_id)))
+            row = cursor.fetchone()
+            if row and row.get('google_meet_link'):
+                return jsonify({"status": "success", "meet_link": row['google_meet_link']}), 200
+
+            # في حال عدم وجود رابط، يتم توليد معرّف اجتماع Google Meet فريد وتخزينه
+            unique_room = f"meet-school-{school_id}-class-{class_id}-" + ''.join(secrets.choice(string.ascii_lowercase) for _ in range(6))
+            meet_link = f"https://meet.google.com/lookup/{unique_room}"
+
+            cursor.execute("UPDATE classes SET google_meet_link = %s WHERE school_id = %s AND id = %s", (meet_link, school_id, int(class_id)))
+            connection.commit()
+            return jsonify({"status": "success", "meet_link": meet_link}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if connection: connection.close()
 
 @app.route('/save_user_profile', methods=['POST'])
 def save_user_profile():
@@ -249,7 +242,6 @@ def save_user_profile():
     finally:
         if connection: connection.close()
 
-
 @app.route('/get_user_profile', methods=['POST'])
 def get_user_profile():
     device_id = request.values.get('device_id')
@@ -265,7 +257,6 @@ def get_user_profile():
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if connection: connection.close()
-
 
 @app.route('/verify', methods=['POST'])
 def verify_school():
@@ -283,13 +274,6 @@ def verify_school():
     finally:
         if connection: connection.close()
 
-
-@app.route('/get_schools', methods=['GET'])
-def get_schools():
-    refresh_cache()
-    return jsonify({"status": "success", "schools": cached_schools}), 200
-
-
 @app.route('/get_classes', methods=['POST'])
 def get_classes():
     school_id = request.values.get('school_id')
@@ -303,7 +287,6 @@ def get_classes():
             return jsonify({"status": "success", "classes": classes}), 200
     finally:
         if connection: connection.close()
-
 
 @app.route('/register_teachers', methods=['POST'])
 def register_teachers():
@@ -334,7 +317,6 @@ def register_teachers():
     finally:
         if connection: connection.close()
 
-
 @app.route('/get_connected_teachers', methods=['POST'])
 def get_connected_teachers():
     school_id = request.values.get('school_id')
@@ -357,7 +339,6 @@ def get_connected_teachers():
     finally:
         if connection: connection.close()
 
-
 @app.route('/join_class', methods=['POST'])
 def join_class():
     school_id = request.values.get('school_id')
@@ -378,7 +359,6 @@ def join_class():
             return jsonify({"status": "success"}), 200
     finally:
         if connection: connection.close()
-
 
 @app.route('/get_class_presence', methods=['POST'])
 def get_class_presence():
@@ -401,7 +381,6 @@ def get_class_presence():
     finally:
         if connection: connection.close()
 
-
 @app.route('/heartbeat_class', methods=['POST'])
 def heartbeat_class():
     school_id = request.values.get('school_id')
@@ -418,7 +397,6 @@ def heartbeat_class():
     finally:
         if connection: connection.close()
 
-
 @app.route('/leave_class', methods=['POST'])
 def leave_class():
     school_id = request.values.get('school_id')
@@ -434,7 +412,6 @@ def leave_class():
             return jsonify({"status": "success"}), 200
     finally:
         if connection: connection.close()
-
 
 @app.route('/request_permission', methods=['POST'])
 def request_permission():
@@ -459,7 +436,6 @@ def request_permission():
     finally:
         if connection: connection.close()
 
-
 @app.route('/get_pending_permissions_for_teacher', methods=['POST'])
 def get_pending_permissions_for_teacher():
     school_id = request.values.get('school_id')
@@ -475,7 +451,6 @@ def get_pending_permissions_for_teacher():
             return jsonify({"status": "success", "requests": reqs}), 200
     finally:
         if connection: connection.close()
-
 
 @app.route('/respond_mic_request', methods=['POST'])
 def respond_mic_request():
@@ -504,7 +479,6 @@ def respond_mic_request():
     finally:
         if connection: connection.close()
 
-
 @app.route('/get_my_permissions', methods=['POST'])
 def get_my_permissions():
     school_id = request.values.get('school_id')
@@ -523,7 +497,6 @@ def get_my_permissions():
     finally:
         if connection: connection.close()
 
-
 @app.route('/check_my_request_status', methods=['POST'])
 def check_my_request_status():
     school_id = request.values.get('school_id')
@@ -541,7 +514,6 @@ def check_my_request_status():
     finally:
         if connection: connection.close()
 
-
 @app.route('/verify_leader_password', methods=['POST'])
 def verify_leader_password():
     school_id = request.values.get('school_id')
@@ -558,7 +530,6 @@ def verify_leader_password():
             return jsonify({"status": "error", "message": "كلمة السر غير صحيحة"}), 401
     finally:
         if connection: connection.close()
-
 
 @app.route('/update_leader_password', methods=['POST'])
 def update_leader_password():
@@ -580,7 +551,6 @@ def update_leader_password():
     finally:
         if connection: connection.close()
 
-
 @app.route('/kick_user', methods=['POST'])
 def kick_user():
     school_id = request.values.get('school_id')
@@ -599,11 +569,9 @@ def kick_user():
     finally:
         if connection: connection.close()
 
-
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"message": "API is running smoothly with Jitsi audio/video support!"}), 200
-
+    return jsonify({"message": "Google Meet API Server is Running!"}), 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
