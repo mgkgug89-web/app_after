@@ -11,7 +11,9 @@ from psycopg2.extras import RealDictCursor
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
-from livekit import api
+
+# استيراد الأدوات الرسمية لـ LiveKit
+from livekit.api import AccessToken, VideoGrants
 
 load_dotenv()
 app = Flask(__name__)
@@ -243,7 +245,7 @@ refresh_cache()
 
 
 # ============================================================
-# 🆕 توليد توكن LiveKit
+# ✅ توليد توكن LiveKit بالطريقة الرسمية والموثوقة
 # ============================================================
 @app.route('/get_livekit_token', methods=['POST'])
 def get_livekit_token():
@@ -256,20 +258,30 @@ def get_livekit_token():
     if not school_id or not class_id or not user_id:
         return jsonify({"status": "error", "message": "بيانات ناقصة"}), 400
 
+    if not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
+        return jsonify({"status": "error", "message": "إعدادات LiveKit غير مكتملة"}), 500
+
     room_name = f"class_{school_id}_{class_id}"
 
     try:
-        token = api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET) \
-            .with_identity(user_id) \
-            .with_name(user_name) \
-            .with_metadata(f'{{"role":"{user_role}","school":"{school_id}","class":"{class_id}"}}') \
-            .with_grants(api.VideoGrants(
+        import json
+        metadata = json.dumps({
+            "role": str(user_role),
+            "school": str(school_id),
+            "class": str(class_id)
+        }, ensure_ascii=False)
+
+        token = AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET) \
+            .with_identity(str(user_id)) \
+            .with_name(str(user_name)) \
+            .with_metadata(metadata) \
+            .with_grants(VideoGrants(
                 room_join=True,
                 room=room_name,
                 can_publish=True,
                 can_subscribe=True,
                 can_publish_data=True,
-                can_publish_sources=["camera", "microphone", "screen_share"],
+                can_publish_sources=["camera", "microphone", "screen_share"]
             )) \
             .with_ttl(timedelta(seconds=3600)) \
             .to_jwt()
